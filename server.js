@@ -9,6 +9,64 @@ const Watchlist = require('./models/Watchlist');
 const app = express();
 const PORT = process.env.PORT || 5001;
 
+// 1. Custom Secure Response Headers Middleware (Helmet-equivalent security posture)
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  // Content Security Policy for API requests
+  res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none';");
+  next();
+});
+
+// 2. High-Performance In-Memory Rate Limiting with proactive garbage collection
+const rateLimitWindowMs = 15 * 60 * 1000; // 15 minutes
+const rateLimitMaxRequests = 500; // 500 requests per 15 minutes per IP
+const ipRequests = new Map();
+
+// Periodic sweeping of stale cache values to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of ipRequests.entries()) {
+    if (now - data.startTime > rateLimitWindowMs) {
+      ipRequests.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
+
+app.use((req, res, next) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const now = Date.now();
+  
+  if (!ipRequests.has(ip)) {
+    ipRequests.set(ip, { startTime: now, count: 1 });
+    next();
+    return;
+  }
+  
+  const data = ipRequests.get(ip);
+  if (now - data.startTime > rateLimitWindowMs) {
+    data.startTime = now;
+    data.count = 1;
+    next();
+    return;
+  }
+  
+  data.count += 1;
+  if (data.count > rateLimitMaxRequests) {
+    res.status(429).json({
+      error: 'Too Many Requests',
+      message: 'Rate limit exceeded. Please try again later.'
+    });
+    return;
+  }
+  
+  next();
+});
+
 // Middleware
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
@@ -144,8 +202,9 @@ app.post('/api/watchlists', async (req, res) => {
     }
     const cleanName = name.trim();
     
-    // Check if already exists
-    const existing = await Watchlist.findOne({ name: { $regex: new RegExp(`^${cleanName}$`, 'i') } });
+    // Escape regex characters to prevent Regular Expression Denial of Service (ReDoS) NoSQL Injection
+    const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existing = await Watchlist.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
     if (existing) {
       return res.status(400).json({ error: 'A watchlist with this name already exists' });
     }
