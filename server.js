@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const Stock = require('./models/Stock');
+const CustomTag = require('./models/CustomTag');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -142,22 +143,25 @@ app.post('/api/stocks', async (req, res) => {
 app.patch('/api/stocks/:symbol', async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
-    const { isFavourite, isfavoute } = req.body;
-
-    const favStatus = isFavourite !== undefined ? isFavourite : (isfavoute !== undefined ? isfavoute : false);
+    const { isFavourite, isfavoute, tags } = req.body;
 
     const stock = await Stock.findOne({ symbol: symbolParam });
     if (!stock) {
       return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found` });
     }
 
-    stock.isFavourite = favStatus;
+    if (isFavourite !== undefined || isfavoute !== undefined) {
+      stock.isFavourite = isFavourite !== undefined ? isFavourite : isfavoute;
+    }
+    if (Array.isArray(tags)) {
+      stock.tags = tags;
+    }
+
     await stock.save();
-    console.log(`Updated stock ${symbolParam}: isFavourite = ${favStatus}`);
     res.json(stock);
   } catch (error) {
     console.error('PATCH /api/stocks/:symbol error:', error);
-    res.status(500).json({ error: 'Failed to update stock favorite status' });
+    res.status(500).json({ error: 'Failed to update stock' });
   }
 });
 
@@ -183,6 +187,48 @@ app.delete('/api/stocks/:symbol', async (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled server error:', err);
   res.status(500).json({ error: 'Internal server error occurred' });
+});
+
+/* ── Custom Tag Routes ─────────────────────────────────────── */
+
+const DEFAULT_CUSTOM_TAGS = [
+  { tagId: 'watchlist1', label: 'Watchlist 1', color: '#f97316' },
+  { tagId: 'watchlist2', label: 'Watchlist 2', color: '#8b5cf6' },
+  { tagId: 'watchlist3', label: 'Watchlist 3', color: '#06b6d4' },
+  { tagId: 'watchlist4', label: 'Watchlist 4', color: '#ec4899' },
+  { tagId: 'watchlist5', label: 'Watchlist 5', color: '#84cc16' },
+];
+
+// GET /api/custom-tags
+app.get('/api/custom-tags', async (req, res) => {
+  try {
+    const saved = await CustomTag.find({});
+    // Merge defaults with saved — saved values override defaults
+    const result = DEFAULT_CUSTOM_TAGS.map(def => {
+      const found = saved.find(s => s.tagId === def.tagId);
+      return found ? { tagId: found.tagId, label: found.label, color: found.color } : def;
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch custom tags' });
+  }
+});
+
+// PUT /api/custom-tags/:tagId
+app.put('/api/custom-tags/:tagId', async (req, res) => {
+  try {
+    const { tagId } = req.params;
+    const { label, color } = req.body;
+    if (!label || !color) return res.status(400).json({ error: 'label and color required' });
+    const tag = await CustomTag.findOneAndUpdate(
+      { tagId },
+      { label: label.trim().slice(0, 24), color },
+      { upsert: true, new: true }
+    );
+    res.json({ tagId: tag.tagId, label: tag.label, color: tag.color });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update custom tag' });
+  }
 });
 
 // Start the server
