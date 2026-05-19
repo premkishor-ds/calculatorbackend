@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const Stock = require('./models/Stock');
 const CustomTag = require('./models/CustomTag');
+const Watchlist = require('./models/Watchlist');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -63,17 +64,26 @@ const DEFAULT_STOCKS_SEED = [
 // Seed DB if it's empty
 async function seedDefaultStocks() {
   try {
-    const count = await Stock.countDocuments();
+    // Ensure default watchlist exists
+    let defaultWatchlist = await Watchlist.findOne({ name: 'default' });
+    if (!defaultWatchlist) {
+      defaultWatchlist = new Watchlist({ name: 'default', isDefault: true });
+      await defaultWatchlist.save();
+      console.log('Seeded default watchlist');
+    }
+
+    const count = await Stock.countDocuments({ watchlist: 'default' });
     if (count === 0) {
-      console.log('Stock collection is empty. Seeding default stock list...');
+      console.log('Stock collection for default watchlist is empty. Seeding default stock list...');
       await Stock.insertMany(DEFAULT_STOCKS_SEED.map(item => ({
         symbol: item.symbol,
         name: item.name,
-        isFavourite: false
+        isFavourite: false,
+        watchlist: 'default'
       })));
       console.log('Seeding completed successfully!');
     } else {
-      console.log(`Database already contains ${count} stocks. Skipping seeding.`);
+      console.log(`Database already contains ${count} stocks for default watchlist. Skipping seeding.`);
     }
   } catch (error) {
     console.error('Error seeding default stocks:', error);
@@ -82,10 +92,76 @@ async function seedDefaultStocks() {
 
 /* ── API Routes ────────────────────────────────────────────── */
 
-// GET /api/stocks - Fetch all stocks
+// GET /api/watchlists - Fetch all watchlists
+app.get('/api/watchlists', async (req, res) => {
+  try {
+    let lists = await Watchlist.find({}).sort({ isDefault: -1, createdAt: 1 });
+    if (lists.length === 0) {
+      const def = new Watchlist({ name: 'default', isDefault: true });
+      await def.save();
+      lists = [def];
+    }
+    res.json(lists);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve watchlists' });
+  }
+});
+
+// POST /api/watchlists - Create a custom watchlist
+app.post('/api/watchlists', async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Watchlist name is required' });
+    }
+    const cleanName = name.trim();
+    
+    // Check if already exists
+    const existing = await Watchlist.findOne({ name: { $regex: new RegExp(`^${cleanName}$`, 'i') } });
+    if (existing) {
+      return res.status(400).json({ error: 'A watchlist with this name already exists' });
+    }
+
+    const wl = new Watchlist({ name: cleanName, isDefault: false });
+    await wl.save();
+    res.status(201).json(wl);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create watchlist', details: err.message });
+  }
+});
+
+// DELETE /api/watchlists/:name - Delete a custom watchlist by name
+app.delete('/api/watchlists/:name', async (req, res) => {
+  try {
+    const nameParam = req.params.name.trim();
+    
+    // Find watchlist
+    const wl = await Watchlist.findOne({ name: nameParam });
+    if (!wl) {
+      return res.status(404).json({ error: 'Watchlist not found' });
+    }
+    
+    if (wl.isDefault || wl.name.toLowerCase() === 'default') {
+      return res.status(400).json({ error: 'The default watchlist cannot be deleted' });
+    }
+
+    // Cascade delete all stocks in this watchlist
+    await Stock.deleteMany({ watchlist: wl.name });
+    
+    // Delete watchlist
+    await Watchlist.findByIdAndDelete(wl._id);
+    
+    res.json({ message: `Watchlist '${wl.name}' and all associated stocks successfully deleted` });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete watchlist', details: err.message });
+  }
+});
+
+// GET /api/stocks - Fetch all stocks for a specific watchlist
 app.get('/api/stocks', async (req, res) => {
   try {
-    const stocks = await Stock.find({}).sort({ updatedAt: -1 });
+    const watchlistName = req.query.watchlist || 'default';
+    const stocks = await Stock.find({ watchlist: watchlistName }).sort({ updatedAt: -1 });
     res.json(stocks);
   } catch (error) {
     console.error('GET /api/stocks error:', error);
@@ -93,10 +169,10 @@ app.get('/api/stocks', async (req, res) => {
   }
 });
 
-// POST /api/stocks - Add a new stock
+// POST /api/stocks - Add a new stock to a specific watchlist
 app.post('/api/stocks', async (req, res) => {
   try {
-    let { symbol, name, isFavourite, isfavoute } = req.body;
+    let { symbol, name, isFavourite, isfavoute, watchlist } = req.body;
     
     if (!symbol) {
       return res.status(400).json({ error: 'Stock symbol is required' });
@@ -107,14 +183,14 @@ app.post('/api/stocks', async (req, res) => {
 
     const formattedSymbol = symbol.trim().toUpperCase();
     const formattedName = name.trim();
+    const wlName = (watchlist || 'default').trim();
     
-    // Normalize isFavourite (handles alternate spellings like "isfavoute")
+    // Normalize isFavourite
     const favStatus = isFavourite !== undefined ? isFavourite : (isfavoute !== undefined ? isfavoute : false);
 
-    // Check if stock already exists
-    let existingStock = await Stock.findOne({ symbol: formattedSymbol });
+    // Check if stock already exists in this watchlist
+    let existingStock = await Stock.findOne({ symbol: formattedSymbol, watchlist: wlName });
     if (existingStock) {
-      // If it exists, let's update its favorite status or name if they changed, or just return it
       existingStock.name = formattedName;
       existingStock.isFavourite = favStatus;
       await existingStock.save();
@@ -124,30 +200,32 @@ app.post('/api/stocks', async (req, res) => {
     const newStock = new Stock({
       symbol: formattedSymbol,
       name: formattedName,
-      isFavourite: favStatus
+      isFavourite: favStatus,
+      watchlist: wlName
     });
 
     await newStock.save();
-    console.log(`Added stock: ${formattedSymbol} (${formattedName})`);
+    console.log(`Added stock: ${formattedSymbol} (${formattedName}) to watchlist: ${wlName}`);
     res.status(201).json(newStock);
   } catch (error) {
     console.error('POST /api/stocks error:', error);
     if (error.code === 11000) {
-      return res.status(409).json({ error: 'Stock symbol already exists in database' });
+      return res.status(409).json({ error: 'Stock symbol already exists in this watchlist' });
     }
     res.status(500).json({ error: 'Failed to add stock to database', details: error.message });
   }
 });
 
-// PATCH /api/stocks/:symbol - Toggle or set favorite status for a stock by symbol
+// PATCH /api/stocks/:symbol - Update favorite status or tags for a stock inside a specific watchlist
 app.patch('/api/stocks/:symbol', async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
+    const wlName = (req.body.watchlist || req.query.watchlist || 'default').trim();
     const { isFavourite, isfavoute, tags } = req.body;
 
-    const stock = await Stock.findOne({ symbol: symbolParam });
+    const stock = await Stock.findOne({ symbol: symbolParam, watchlist: wlName });
     if (!stock) {
-      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found` });
+      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found in watchlist ${wlName}` });
     }
 
     if (isFavourite !== undefined || isfavoute !== undefined) {
@@ -165,18 +243,19 @@ app.patch('/api/stocks/:symbol', async (req, res) => {
   }
 });
 
-// DELETE /api/stocks/:symbol - Delete a stock by symbol
+// DELETE /api/stocks/:symbol - Delete a stock from a specific watchlist
 app.delete('/api/stocks/:symbol', async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
-    const result = await Stock.findOneAndDelete({ symbol: symbolParam });
+    const wlName = (req.query.watchlist || req.body.watchlist || 'default').trim();
+    const result = await Stock.findOneAndDelete({ symbol: symbolParam, watchlist: wlName });
     
     if (!result) {
-      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found` });
+      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found in watchlist ${wlName}` });
     }
 
-    console.log(`Deleted stock: ${symbolParam}`);
-    res.json({ message: `Stock ${symbolParam} successfully deleted`, deletedStock: result });
+    console.log(`Deleted stock: ${symbolParam} from watchlist ${wlName}`);
+    res.json({ message: `Stock ${symbolParam} successfully deleted from watchlist ${wlName}`, deletedStock: result });
   } catch (error) {
     console.error('DELETE /api/stocks/:symbol error:', error);
     res.status(500).json({ error: 'Failed to delete stock from database' });
@@ -203,7 +282,6 @@ const DEFAULT_CUSTOM_TAGS = [
 app.get('/api/custom-tags', async (req, res) => {
   try {
     const saved = await CustomTag.find({});
-    // Merge defaults with saved — saved values override defaults
     const result = DEFAULT_CUSTOM_TAGS.map(def => {
       const found = saved.find(s => s.tagId === def.tagId);
       return found ? { tagId: found.tagId, label: found.label, color: found.color } : def;

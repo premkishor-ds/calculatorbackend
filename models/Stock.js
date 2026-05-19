@@ -10,9 +10,13 @@ const stockSchema = new mongoose.Schema({
   symbol: {
     type: String,
     required: [true, 'Stock symbol is required'],
-    unique: true,
     trim: true,
     uppercase: true
+  },
+  watchlist: {
+    type: String,
+    default: 'default',
+    trim: true
   },
   name: {
     type: String,
@@ -34,5 +38,8 @@ const stockSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+// Set compound unique index so a symbol can only exist once per watchlist
+stockSchema.index({ watchlist: 1, symbol: 1 }, { unique: true });
 
 module.exports = mongoose.model('Stock', stockSchema);
