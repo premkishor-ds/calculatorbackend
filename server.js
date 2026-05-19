@@ -10,11 +10,29 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 
 // Middleware
-app.use(cors());
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:3000'];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Blocked by CORS security policy'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
+// MongoDB Connection with Enterprise connection pooling
+mongoose.connect(process.env.MONGODB_URI, {
+  maxPoolSize: 100,
+  minPoolSize: 10,
+  socketTimeoutMS: 45000,
+  serverSelectionTimeoutMS: 5000,
+})
   .then(() => {
     console.log('Successfully connected to MongoDB.');
     seedDefaultStocks();
