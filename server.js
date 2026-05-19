@@ -16,11 +16,21 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    if (!origin) {
       callback(null, true);
-    } else {
-      callback(new Error('Blocked by CORS security policy'));
+      return;
     }
+    // Check if origin is explicitly allowed
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+      return;
+    }
+    // Self-healing: Dynamically allow any netlify.app origins for seamless front-backend integration
+    if (origin.endsWith('netlify.app') || origin.endsWith('.netlify.app')) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error('Blocked by CORS security policy'));
   },
   credentials: true
 }));
