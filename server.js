@@ -5,6 +5,7 @@ const cors = require('cors');
 const Stock = require('./models/Stock');
 const CustomTag = require('./models/CustomTag');
 const Watchlist = require('./models/Watchlist');
+const Drawing = require('./models/Drawing');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -232,13 +233,22 @@ app.delete('/api/watchlists/:name', async (req, res) => {
       return res.status(400).json({ error: 'The default watchlist cannot be deleted' });
     }
 
+    // Get all symbols in this watchlist first to cascade delete drawings
+    const stocksInWatchlist = await Stock.find({ watchlist: wl.name });
+    const symbols = stocksInWatchlist.map(s => s.symbol);
+
     // Cascade delete all stocks in this watchlist
     await Stock.deleteMany({ watchlist: wl.name });
+
+    // Cascade delete drawings for these symbols
+    if (symbols.length > 0) {
+      await Drawing.deleteMany({ symbol: { $in: symbols } });
+    }
     
     // Delete watchlist
     await Watchlist.findByIdAndDelete(wl._id);
     
-    res.json({ message: `Watchlist '${wl.name}' and all associated stocks successfully deleted` });
+    res.json({ message: `Watchlist '${wl.name}', associated stocks, and drawings successfully deleted` });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete watchlist', details: err.message });
   }
@@ -341,8 +351,11 @@ app.delete('/api/stocks/:symbol', async (req, res) => {
       return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found in watchlist ${wlName}` });
     }
 
-    console.log(`Deleted stock: ${symbolParam} from watchlist ${wlName}`);
-    res.json({ message: `Stock ${symbolParam} successfully deleted from watchlist ${wlName}`, deletedStock: result });
+    // Cascade delete drawings for this symbol
+    await Drawing.deleteMany({ symbol: symbolParam });
+
+    console.log(`Deleted stock: ${symbolParam} from watchlist ${wlName} and cascade deleted its drawings.`);
+    res.json({ message: `Stock ${symbolParam} and its drawings successfully deleted from watchlist ${wlName}`, deletedStock: result });
   } catch (error) {
     console.error('DELETE /api/stocks/:symbol error:', error);
     res.status(500).json({ error: 'Failed to delete stock from database' });
@@ -393,6 +406,66 @@ app.put('/api/custom-tags/:tagId', async (req, res) => {
     res.json({ tagId: tag.tagId, label: tag.label, color: tag.color });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update custom tag' });
+  }
+});
+
+/* ── Drawings API Routes ────────────────────────────────────── */
+
+// GET /api/drawings - Fetch drawings for a specific symbol
+app.get('/api/drawings', async (req, res) => {
+  try {
+    const { symbol, chartMode } = req.query;
+    if (!symbol) {
+      return res.status(400).json({ error: 'Symbol query parameter is required' });
+    }
+    const filter = { symbol: symbol.trim().toUpperCase() };
+    if (chartMode) {
+      filter.chartMode = chartMode.trim().toLowerCase();
+    }
+    const drawings = await Drawing.find(filter);
+    res.json(drawings);
+  } catch (err) {
+    console.error('GET /api/drawings error:', err);
+    res.status(500).json({ error: 'Failed to retrieve drawings' });
+  }
+});
+
+// POST /api/drawings/sync - Synchronize drawings for a symbol + mode
+app.post('/api/drawings/sync', async (req, res) => {
+  try {
+    const { symbol, chartMode, drawings } = req.body;
+    if (!symbol) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+    if (!chartMode) {
+      return res.status(400).json({ error: 'Chart mode is required' });
+    }
+    if (!Array.isArray(drawings)) {
+      return res.status(400).json({ error: 'Drawings must be an array' });
+    }
+
+    const cleanSymbol = symbol.trim().toUpperCase();
+    const cleanMode = chartMode.trim().toLowerCase();
+
+    // 1. Delete all existing drawings for this symbol + mode
+    await Drawing.deleteMany({ symbol: cleanSymbol, chartMode: cleanMode });
+
+    // 2. Insert new drawings
+    const drawingsToSave = drawings.map(d => ({
+      symbol: cleanSymbol,
+      chartMode: cleanMode,
+      type: d.type,
+      points: d.points || [],
+      price: d.price,
+      time: d.time,
+      color: d.color || '#22c55e'
+    }));
+
+    const savedDrawings = await Drawing.insertMany(drawingsToSave);
+    res.status(200).json(savedDrawings);
+  } catch (err) {
+    console.error('POST /api/drawings/sync error:', err);
+    res.status(500).json({ error: 'Failed to synchronize drawings', details: err.message });
   }
 });
 
