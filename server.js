@@ -1,11 +1,19 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const { WebSocketServer } = require('ws');
 const mongoose = require('mongoose');
 const cors = require('cors');
+
+// Import Schemas
 const Stock = require('./models/Stock');
 const CustomTag = require('./models/CustomTag');
 const Watchlist = require('./models/Watchlist');
 const Drawing = require('./models/Drawing');
+const Alert = require('./models/Alert');
+const Order = require('./models/Order');
+const Position = require('./models/Position');
+const WorkspaceLayout = require('./models/WorkspaceLayout');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -68,7 +76,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middleware
+// CORS Config
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
   : ['http://localhost:3000'];
@@ -79,12 +87,10 @@ app.use(cors({
       callback(null, true);
       return;
     }
-    // Check if origin is explicitly allowed
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
       return;
     }
-    // Self-healing: Dynamically allow any netlify.app origins for seamless front-backend integration
     if (origin.endsWith('netlify.app') || origin.endsWith('.netlify.app')) {
       callback(null, true);
       return;
@@ -95,7 +101,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MongoDB Connection with Enterprise connection pooling
+// MongoDB Connection with Enterprise connection pooling & Self-Healing Local Fallback
 mongoose.connect(process.env.MONGODB_URI, {
   maxPoolSize: 100,
   minPoolSize: 10,
@@ -107,7 +113,18 @@ mongoose.connect(process.env.MONGODB_URI, {
     seedDefaultStocks();
   })
   .catch((err) => {
-    console.error('MongoDB connection error:', err);
+    console.error('MongoDB Atlas connection error:', err);
+    console.log('Attempting self-healing fallback to local MongoDB instance...');
+    mongoose.connect('mongodb://127.0.0.1:27017/vision_terminal', {
+      serverSelectionTimeoutMS: 3000
+    })
+      .then(() => {
+        console.log('Successfully connected to local fallback MongoDB.');
+        seedDefaultStocks();
+      })
+      .catch((localErr) => {
+        console.warn('Local MongoDB fallback also failed. Running in standalone Mode (endpoints will handle operations gracefully).');
+      });
   });
 
 // Predefined list of default symbols and their correct corporate names
@@ -151,7 +168,6 @@ const DEFAULT_STOCKS_SEED = [
 // Seed DB if it's empty
 async function seedDefaultStocks() {
   try {
-    // Ensure default watchlist exists
     let defaultWatchlist = await Watchlist.findOne({ name: 'default' });
     if (!defaultWatchlist) {
       defaultWatchlist = new Watchlist({ name: 'default', isDefault: true });
@@ -174,6 +190,221 @@ async function seedDefaultStocks() {
     }
   } catch (error) {
     console.error('Error seeding default stocks:', error);
+  }
+}
+
+/* ── Live Market Simulated Feeds State ─────────────────────── */
+const stockBaselines = {
+  'VOLTAMP.NS': 10250.0,
+  'TDPOWERSYS.NS': 450.0,
+  'TARIL.NS': 780.0,
+  'PRECWIRE.NS': 150.0,
+  'MAZDOCK.NS': 2400.0,
+  'KIRLOSENG.NS': 920.0,
+  'HSCL.NS': 380.0,
+  'HFCL.NS': 115.0,
+  'E2E.NS': 1200.0,
+  'BECTORFOOD.NS': 1400.0,
+  'AURIONPRO.NS': 1650.0,
+  'KEI.NS': 3200.0,
+  'COFORGE.NS': 5200.0,
+  'MANORAMA.NS': 650.0,
+  'ZENTEC.NS': 850.0,
+  'APARINDS.NS': 6400.0,
+  'SHILCTECH.NS': 720.0,
+  'INOXINDIA.NS': 1100.0,
+  'KRN.NS': 350.0,
+  'IDEAFORGE.NS': 680.0,
+  'GRSE.NS': 1800.0,
+  'PARAS.NS': 980.0,
+  'ASTRAMICRO.NS': 650.0,
+  'SYRMA.NS': 490.0,
+  'KAYNES.NS': 2800.0,
+  'AEROFLEX.NS': 160.0,
+  'KMEW.NS': 180.0,
+  'GVT&D.NS': 850.0,
+  'CGPOWER.NS': 680.0,
+  'APOLLO.NS': 6100.0,
+  'UNIMECH.NS': 420.0,
+  'DATAPATTNS.NS': 2200.0,
+  'MTARTECH.NS': 1900.0,
+  'NETWEB.NS': 1250.0
+};
+
+const stockPrices = {};
+for (const symbol in stockBaselines) {
+  const base = stockBaselines[symbol];
+  stockPrices[symbol] = {
+    price: base,
+    change: 0,
+    changePercent: 0,
+    open: base * (1 - 0.01 * (Math.random() - 0.5))
+  };
+}
+
+// Paper Trading Account global state
+let virtualBalance = 1000000.0;
+
+/* ── WebSocket Setup & Simulator Loop ──────────────────────── */
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws) => {
+  console.log('Client connected to WebSocket stream');
+  
+  // Send active balance upon connecting
+  ws.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
+  
+  ws.on('message', (message) => {
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+    } catch {}
+  });
+
+  ws.on('close', () => {
+    console.log('Client disconnected from stream');
+  });
+});
+
+// Periodic Random Walk Market Simulator Ticker Loop (Every 1 second)
+setInterval(async () => {
+  const clients = wss.clients;
+  if (clients.size === 0) return;
+
+  for (const symbol in stockPrices) {
+    const data = stockPrices[symbol];
+    const volatility = 0.0012; // 0.12% max move per second
+    const percentChange = (Math.random() - 0.5) * 2 * volatility;
+    const delta = data.price * percentChange;
+    
+    data.price = parseFloat((data.price + delta).toFixed(2));
+    data.change = parseFloat((data.price - data.open).toFixed(2));
+    data.changePercent = parseFloat(((data.change / data.open) * 100).toFixed(2));
+
+    const tick = {
+      type: 'tick',
+      symbol,
+      price: data.price,
+      change: data.change,
+      changePercent: data.changePercent,
+      volume: Math.floor(Math.random() * 80) + 5,
+      time: Math.floor(Date.now() / 1000)
+    };
+
+    const msg = JSON.stringify(tick);
+    clients.forEach(client => {
+      if (client.readyState === 1) { // OPEN
+        client.send(msg);
+      }
+    });
+
+    // Check matches for Alerts & Pending Paper Orders
+    await checkAlertsForSymbol(symbol, data.price);
+    await checkOrdersForSymbol(symbol, data.price);
+  }
+}, 1000);
+
+async function checkAlertsForSymbol(symbol, currentPrice) {
+  try {
+    const activeAlerts = await Alert.find({ symbol, isTriggered: false, isActive: true });
+    for (const alert of activeAlerts) {
+      let triggered = false;
+      if (alert.condition === 'price_crosses' && Math.abs(currentPrice - alert.value) / alert.value < 0.0015) {
+        triggered = true;
+      } else if (alert.condition === 'price_above' && currentPrice >= alert.value) {
+        triggered = true;
+      } else if (alert.condition === 'price_below' && currentPrice <= alert.value) {
+        triggered = true;
+      }
+
+      if (triggered) {
+        alert.isTriggered = true;
+        alert.triggeredAt = new Date();
+        await alert.save();
+
+        const alertMsg = JSON.stringify({
+          type: 'alert_triggered',
+          alert: {
+            _id: alert._id,
+            symbol: alert.symbol,
+            condition: alert.condition,
+            value: alert.value,
+            triggeredAt: alert.triggeredAt
+          }
+        });
+        wss.clients.forEach(c => {
+          if (c.readyState === 1) c.send(alertMsg);
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Alert checker loop failure:', err);
+  }
+}
+
+async function checkOrdersForSymbol(symbol, currentPrice) {
+  try {
+    const pending = await Order.find({ symbol, status: 'pending' });
+    for (const order of pending) {
+      let fill = false;
+      if (order.type === 'limit') {
+        if (order.side === 'buy' && currentPrice <= order.price) fill = true;
+        if (order.side === 'sell' && currentPrice >= order.price) fill = true;
+      }
+
+      if (fill) {
+        order.status = 'filled';
+        order.filledAt = new Date();
+        await order.save();
+
+        let pos = await Position.findOne({ symbol });
+        if (order.side === 'buy') {
+          const totalCost = (pos ? (pos.averagePrice * pos.quantity) : 0) + (order.price * order.quantity);
+          const totalQty = (pos ? pos.quantity : 0) + order.quantity;
+          if (!pos) {
+            pos = new Position({
+              symbol,
+              side: 'buy',
+              averagePrice: order.price,
+              quantity: order.quantity
+            });
+          } else {
+            pos.averagePrice = parseFloat((totalCost / totalQty).toFixed(2));
+            pos.quantity = totalQty;
+          }
+          virtualBalance = parseFloat((virtualBalance - (order.price * order.quantity)).toFixed(2));
+        } else { // sell
+          if (pos) {
+            const qtyFilled = Math.min(pos.quantity, order.quantity);
+            const profit = parseFloat(((order.price - pos.averagePrice) * qtyFilled).toFixed(2));
+            pos.quantity -= qtyFilled;
+            pos.realizedPnL = parseFloat((pos.realizedPnL + profit).toFixed(2));
+            virtualBalance = parseFloat((virtualBalance + (order.price * order.quantity)).toFixed(2));
+            if (pos.quantity === 0) {
+              await Position.findByIdAndDelete(pos._id);
+              pos = null;
+            }
+          }
+        }
+
+        if (pos) await pos.save();
+
+        const execMsg = JSON.stringify({
+          type: 'order_filled',
+          order,
+          position: pos,
+          balance: virtualBalance
+        });
+        wss.clients.forEach(c => {
+          if (c.readyState === 1) c.send(execMsg);
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Order matching engine execution failure:', err);
   }
 }
 
@@ -202,8 +433,6 @@ app.post('/api/watchlists', async (req, res) => {
       return res.status(400).json({ error: 'Watchlist name is required' });
     }
     const cleanName = name.trim();
-    
-    // Escape regex characters to prevent Regular Expression Denial of Service (ReDoS) NoSQL Injection
     const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const existing = await Watchlist.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
     if (existing) {
@@ -218,36 +447,24 @@ app.post('/api/watchlists', async (req, res) => {
   }
 });
 
-// DELETE /api/watchlists/:name - Delete a custom watchlist by name
+// DELETE /api/watchlists/:name - Delete a custom watchlist
 app.delete('/api/watchlists/:name', async (req, res) => {
   try {
     const nameParam = req.params.name.trim();
-    
-    // Find watchlist
     const wl = await Watchlist.findOne({ name: nameParam });
-    if (!wl) {
-      return res.status(404).json({ error: 'Watchlist not found' });
-    }
+    if (!wl) return res.status(404).json({ error: 'Watchlist not found' });
     
     if (wl.isDefault || wl.name.toLowerCase() === 'default') {
       return res.status(400).json({ error: 'The default watchlist cannot be deleted' });
     }
 
-    // Get all symbols in this watchlist first to cascade delete drawings
     const stocksInWatchlist = await Stock.find({ watchlist: wl.name });
     const symbols = stocksInWatchlist.map(s => s.symbol);
-
-    // Cascade delete all stocks in this watchlist
     await Stock.deleteMany({ watchlist: wl.name });
-
-    // Cascade delete drawings for these symbols
     if (symbols.length > 0) {
       await Drawing.deleteMany({ symbol: { $in: symbols } });
     }
-    
-    // Delete watchlist
     await Watchlist.findByIdAndDelete(wl._id);
-    
     res.json({ message: `Watchlist '${wl.name}', associated stocks, and drawings successfully deleted` });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete watchlist', details: err.message });
@@ -261,7 +478,6 @@ app.get('/api/stocks', async (req, res) => {
     const stocks = await Stock.find({ watchlist: watchlistName }).sort({ updatedAt: -1 });
     res.json(stocks);
   } catch (error) {
-    console.error('GET /api/stocks error:', error);
     res.status(500).json({ error: 'Failed to retrieve stocks from database' });
   }
 });
@@ -270,22 +486,24 @@ app.get('/api/stocks', async (req, res) => {
 app.post('/api/stocks', async (req, res) => {
   try {
     let { symbol, name, isFavourite, isfavoute, watchlist } = req.body;
-    
-    if (!symbol) {
-      return res.status(400).json({ error: 'Stock symbol is required' });
-    }
-    if (!name) {
-      return res.status(400).json({ error: 'Stock name is required' });
-    }
+    if (!symbol) return res.status(400).json({ error: 'Stock symbol is required' });
+    if (!name) return res.status(400).json({ error: 'Stock name is required' });
 
     const formattedSymbol = symbol.trim().toUpperCase();
     const formattedName = name.trim();
     const wlName = (watchlist || 'default').trim();
-    
-    // Normalize isFavourite
     const favStatus = isFavourite !== undefined ? isFavourite : (isfavoute !== undefined ? isfavoute : false);
 
-    // Check if stock already exists in this watchlist
+    // Dynamic tick state seeding if not already baseline
+    if (!stockPrices[formattedSymbol]) {
+      stockPrices[formattedSymbol] = {
+        price: 500.0,
+        change: 0,
+        changePercent: 0,
+        open: 500.0
+      };
+    }
+
     let existingStock = await Stock.findOne({ symbol: formattedSymbol, watchlist: wlName });
     if (existingStock) {
       existingStock.name = formattedName;
@@ -302,10 +520,8 @@ app.post('/api/stocks', async (req, res) => {
     });
 
     await newStock.save();
-    console.log(`Added stock: ${formattedSymbol} (${formattedName}) to watchlist: ${wlName}`);
     res.status(201).json(newStock);
   } catch (error) {
-    console.error('POST /api/stocks error:', error);
     if (error.code === 11000) {
       return res.status(409).json({ error: 'Stock symbol already exists in this watchlist' });
     }
@@ -313,7 +529,7 @@ app.post('/api/stocks', async (req, res) => {
   }
 });
 
-// PATCH /api/stocks/:symbol - Update favorite status or tags for a stock inside a specific watchlist
+// PATCH /api/stocks/:symbol - Update favourite or tags
 app.patch('/api/stocks/:symbol', async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
@@ -321,55 +537,36 @@ app.patch('/api/stocks/:symbol', async (req, res) => {
     const { isFavourite, isfavoute, tags } = req.body;
 
     const stock = await Stock.findOne({ symbol: symbolParam, watchlist: wlName });
-    if (!stock) {
-      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found in watchlist ${wlName}` });
-    }
+    if (!stock) return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found` });
 
     if (isFavourite !== undefined || isfavoute !== undefined) {
       stock.isFavourite = isFavourite !== undefined ? isFavourite : isfavoute;
     }
-    if (Array.isArray(tags)) {
-      stock.tags = tags;
-    }
+    if (Array.isArray(tags)) stock.tags = tags;
 
     await stock.save();
     res.json(stock);
   } catch (error) {
-    console.error('PATCH /api/stocks/:symbol error:', error);
     res.status(500).json({ error: 'Failed to update stock' });
   }
 });
 
-// DELETE /api/stocks/:symbol - Delete a stock from a specific watchlist
+// DELETE /api/stocks/:symbol - Delete stock and its drawings
 app.delete('/api/stocks/:symbol', async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
     const wlName = (req.query.watchlist || req.body.watchlist || 'default').trim();
     const result = await Stock.findOneAndDelete({ symbol: symbolParam, watchlist: wlName });
-    
-    if (!result) {
-      return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found in watchlist ${wlName}` });
-    }
+    if (!result) return res.status(404).json({ error: `Stock not found` });
 
-    // Cascade delete drawings for this symbol
     await Drawing.deleteMany({ symbol: symbolParam });
-
-    console.log(`Deleted stock: ${symbolParam} from watchlist ${wlName} and cascade deleted its drawings.`);
-    res.json({ message: `Stock ${symbolParam} and its drawings successfully deleted from watchlist ${wlName}`, deletedStock: result });
+    res.json({ message: `Stock ${symbolParam} deleted successfully`, deletedStock: result });
   } catch (error) {
-    console.error('DELETE /api/stocks/:symbol error:', error);
     res.status(500).json({ error: 'Failed to delete stock from database' });
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Unhandled server error:', err);
-  res.status(500).json({ error: 'Internal server error occurred' });
-});
-
 /* ── Custom Tag Routes ─────────────────────────────────────── */
-
 const DEFAULT_CUSTOM_TAGS = [
   { tagId: 'watchlist1', label: 'Watchlist 1', color: '#f97316' },
   { tagId: 'watchlist2', label: 'Watchlist 2', color: '#8b5cf6' },
@@ -378,7 +575,6 @@ const DEFAULT_CUSTOM_TAGS = [
   { tagId: 'watchlist5', label: 'Watchlist 5', color: '#84cc16' },
 ];
 
-// GET /api/custom-tags
 app.get('/api/custom-tags', async (req, res) => {
   try {
     const saved = await CustomTag.find({});
@@ -392,7 +588,6 @@ app.get('/api/custom-tags', async (req, res) => {
   }
 });
 
-// PUT /api/custom-tags/:tagId
 app.put('/api/custom-tags/:tagId', async (req, res) => {
   try {
     const { tagId } = req.params;
@@ -410,47 +605,30 @@ app.put('/api/custom-tags/:tagId', async (req, res) => {
 });
 
 /* ── Drawings API Routes ────────────────────────────────────── */
-
-// GET /api/drawings - Fetch drawings for a specific symbol
 app.get('/api/drawings', async (req, res) => {
   try {
     const { symbol, chartMode } = req.query;
-    if (!symbol) {
-      return res.status(400).json({ error: 'Symbol query parameter is required' });
-    }
+    if (!symbol) return res.status(400).json({ error: 'Symbol query parameter is required' });
     const filter = { symbol: symbol.trim().toUpperCase() };
-    if (chartMode) {
-      filter.chartMode = chartMode.trim().toLowerCase();
-    }
+    if (chartMode) filter.chartMode = chartMode.trim().toLowerCase();
     const drawings = await Drawing.find(filter);
     res.json(drawings);
   } catch (err) {
-    console.error('GET /api/drawings error:', err);
     res.status(500).json({ error: 'Failed to retrieve drawings' });
   }
 });
 
-// POST /api/drawings/sync - Synchronize drawings for a symbol + mode
 app.post('/api/drawings/sync', async (req, res) => {
   try {
     const { symbol, chartMode, drawings } = req.body;
-    if (!symbol) {
-      return res.status(400).json({ error: 'Symbol is required' });
-    }
-    if (!chartMode) {
-      return res.status(400).json({ error: 'Chart mode is required' });
-    }
-    if (!Array.isArray(drawings)) {
-      return res.status(400).json({ error: 'Drawings must be an array' });
-    }
+    if (!symbol) return res.status(400).json({ error: 'Symbol is required' });
+    if (!chartMode) return res.status(400).json({ error: 'Chart mode is required' });
+    if (!Array.isArray(drawings)) return res.status(400).json({ error: 'Drawings must be an array' });
 
     const cleanSymbol = symbol.trim().toUpperCase();
     const cleanMode = chartMode.trim().toLowerCase();
 
-    // 1. Delete all existing drawings for this symbol + mode
     await Drawing.deleteMany({ symbol: cleanSymbol, chartMode: cleanMode });
-
-    // 2. Insert new drawings
     const drawingsToSave = drawings.map(d => ({
       symbol: cleanSymbol,
       chartMode: cleanMode,
@@ -464,12 +642,256 @@ app.post('/api/drawings/sync', async (req, res) => {
     const savedDrawings = await Drawing.insertMany(drawingsToSave);
     res.status(200).json(savedDrawings);
   } catch (err) {
-    console.error('POST /api/drawings/sync error:', err);
     res.status(500).json({ error: 'Failed to synchronize drawings', details: err.message });
   }
 });
 
+/* ── Paper Trading Panel API Endpoints ─────────────────────── */
+
+// GET /api/trading/portfolio - Retrieve account balance
+app.get('/api/trading/portfolio', (req, res) => {
+  res.json({ balance: virtualBalance });
+});
+
+// POST /api/trading/portfolio/reset - Reset paper trading account balance & clear ledger
+app.post('/api/trading/portfolio/reset', async (req, res) => {
+  try {
+    virtualBalance = 1000000.0;
+    await Position.deleteMany({});
+    await Order.deleteMany({});
+    
+    // Broadcast reset to connected sockets
+    wss.clients.forEach(c => {
+      if (c.readyState === 1) {
+        c.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
+      }
+    });
+    
+    res.json({ message: 'Paper trading account reset successfully', balance: virtualBalance });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reset paper account' });
+  }
+});
+
+// GET /api/trading/positions - Retrieve all open virtual positions
+app.get('/api/trading/positions', async (req, res) => {
+  try {
+    const positions = await Position.find({});
+    // Attach current pricing dynamically
+    const updated = positions.map(pos => {
+      const live = stockPrices[pos.symbol]?.price || pos.averagePrice;
+      const profit = parseFloat(((live - pos.averagePrice) * pos.quantity * (pos.side === 'buy' ? 1 : -1)).toFixed(2));
+      return {
+        ...pos.toObject(),
+        currentPrice: live,
+        unrealizedPnL: profit
+      };
+    });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve holdings' });
+  }
+});
+
+// GET /api/trading/orders - Retrieve complete order history log
+app.get('/api/trading/orders', async (req, res) => {
+  try {
+    const orders = await Order.find({}).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve orders' });
+  }
+});
+
+// POST /api/trading/orders - Create trade orders (Market/Limit execution)
+app.post('/api/trading/orders', async (req, res) => {
+  try {
+    const { symbol, side, type, price, quantity } = req.body;
+    if (!symbol) return res.status(400).json({ error: 'Symbol is required' });
+    if (!side || !['buy', 'sell'].includes(side)) return res.status(400).json({ error: 'Side must be buy/sell' });
+    if (!type || !['market', 'limit'].includes(type)) return res.status(400).json({ error: 'Type must be market/limit' });
+    if (!quantity || quantity <= 0) return res.status(400).json({ error: 'Invalid quantity' });
+
+    const symUpper = symbol.trim().toUpperCase();
+    const livePrice = stockPrices[symUpper]?.price || 500.0;
+    const executionPrice = type === 'market' ? livePrice : parseFloat(Number(price).toFixed(2));
+
+    if (type === 'market') {
+      // Execute fill instantly!
+      if (side === 'buy') {
+        const cost = executionPrice * quantity;
+        if (cost > virtualBalance) return res.status(400).json({ error: 'Insufficient virtual cash balance' });
+        
+        let pos = await Position.findOne({ symbol: symUpper });
+        if (!pos) {
+          pos = new Position({ symbol: symUpper, side: 'buy', averagePrice: executionPrice, quantity });
+        } else {
+          const totalCost = (pos.averagePrice * pos.quantity) + cost;
+          pos.quantity += quantity;
+          pos.averagePrice = parseFloat((totalCost / pos.quantity).toFixed(2));
+        }
+        await pos.save();
+        virtualBalance = parseFloat((virtualBalance - cost).toFixed(2));
+      } else { // sell
+        let pos = await Position.findOne({ symbol: symUpper });
+        if (!pos || pos.quantity < quantity) return res.status(400).json({ error: 'Holdings insufficient for sell order' });
+        
+        const profit = parseFloat(((executionPrice - pos.averagePrice) * quantity).toFixed(2));
+        pos.quantity -= quantity;
+        pos.realizedPnL = parseFloat((pos.realizedPnL + profit).toFixed(2));
+        virtualBalance = parseFloat((virtualBalance + (executionPrice * quantity)).toFixed(2));
+        
+        if (pos.quantity === 0) {
+          await Position.findByIdAndDelete(pos._id);
+        } else {
+          await pos.save();
+        }
+      }
+
+      const completedOrder = new Order({
+        symbol: symUpper,
+        side,
+        type,
+        price: executionPrice,
+        quantity,
+        status: 'filled',
+        filledAt: new Date()
+      });
+      await completedOrder.save();
+
+      // Broadcast update
+      wss.clients.forEach(c => {
+        if (c.readyState === 1) {
+          c.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
+        }
+      });
+
+      return res.status(201).json({ order: completedOrder, balance: virtualBalance });
+    } else {
+      // Limit order - post to pending order book
+      const pendingOrder = new Order({
+        symbol: symUpper,
+        side,
+        type,
+        price: executionPrice,
+        quantity,
+        status: 'pending'
+      });
+      await pendingOrder.save();
+      return res.status(201).json({ order: pendingOrder, balance: virtualBalance });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Order placement failed', details: err.message });
+  }
+});
+
+// DELETE /api/trading/orders/:id - Cancel working limit order
+app.delete('/api/trading/orders/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = await Order.findOne({ _id: id, status: 'pending' });
+    if (!order) return res.status(404).json({ error: 'Pending order not found' });
+    order.status = 'cancelled';
+    await order.save();
+    res.json({ message: 'Order successfully cancelled', order });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to cancel order' });
+  }
+});
+
+/* ── Alert System API Endpoints ────────────────────────────── */
+
+app.get('/api/alerts', async (req, res) => {
+  try {
+    const list = await Alert.find({}).sort({ createdAt: -1 });
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load alerts' });
+  }
+});
+
+app.post('/api/alerts', async (req, res) => {
+  try {
+    const { symbol, condition, value } = req.body;
+    if (!symbol || !condition || value === undefined) {
+      return res.status(400).json({ error: 'Symbol, condition, and price level are required' });
+    }
+    const newAlert = new Alert({
+      symbol: symbol.trim().toUpperCase(),
+      condition,
+      value: parseFloat(value)
+    });
+    await newAlert.save();
+    res.status(201).json(newAlert);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create alert' });
+  }
+});
+
+app.delete('/api/alerts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await Alert.findByIdAndDelete(id);
+    res.json({ message: 'Alert deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete alert' });
+  }
+});
+
+/* ── Workspace Templates API Endpoints ─────────────────────── */
+
+app.get('/api/workspace/layouts', async (req, res) => {
+  try {
+    const layouts = await WorkspaceLayout.find({}).sort({ updatedAt: -1 });
+    res.json(layouts);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load workspace layouts' });
+  }
+});
+
+app.get('/api/workspace/layouts/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const item = await WorkspaceLayout.findOne({ name });
+    if (!item) return res.status(404).json({ error: 'Layout not found' });
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch layout details' });
+  }
+});
+
+app.post('/api/workspace/layouts', async (req, res) => {
+  try {
+    const { name, layout } = req.body;
+    if (!name || !layout) return res.status(400).json({ error: 'Name and layout parameters required' });
+    const item = await WorkspaceLayout.findOneAndUpdate(
+      { name: name.trim() },
+      { layout },
+      { upsert: true, new: true }
+    );
+    res.status(200).json(item);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save workspace layout' });
+  }
+});
+
+app.delete('/api/workspace/layouts/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    await WorkspaceLayout.findOneAndDelete({ name });
+    res.json({ message: 'Workspace layout deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete layout' });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error:', err);
+  res.status(500).json({ error: 'Internal server error occurred' });
+});
+
 // Start the server
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Vision backend server is running on http://localhost:${PORT}`);
 });
