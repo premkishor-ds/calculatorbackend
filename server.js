@@ -284,6 +284,22 @@ setInterval(async () => {
     data.change = parseFloat((data.price - data.open).toFixed(2));
     data.changePercent = parseFloat(((data.change / data.open) * 100).toFixed(2));
 
+    const bids = [];
+    const asks = [];
+    const spreadSteps = [0.05, 0.10, 0.15, 0.20, 0.25];
+    for (let i = 0; i < 5; i++) {
+      bids.push({
+        price: parseFloat((data.price - spreadSteps[i]).toFixed(2)),
+        size: Math.floor(Math.random() * 800) + 100,
+        count: Math.floor(Math.random() * 15) + 1
+      });
+      asks.push({
+        price: parseFloat((data.price + spreadSteps[i]).toFixed(2)),
+        size: Math.floor(Math.random() * 800) + 100,
+        count: Math.floor(Math.random() * 15) + 1
+      });
+    }
+
     const tick = {
       type: 'tick',
       symbol,
@@ -291,7 +307,9 @@ setInterval(async () => {
       change: data.change,
       changePercent: data.changePercent,
       volume: Math.floor(Math.random() * 80) + 5,
-      time: Math.floor(Date.now() / 1000)
+      time: Math.floor(Date.now() / 1000),
+      bids,
+      asks
     };
 
     const msg = JSON.stringify(tick);
