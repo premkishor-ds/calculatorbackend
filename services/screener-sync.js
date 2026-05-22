@@ -72,6 +72,24 @@ async function runScreenerSync(options = {}) {
       await MarketStock.bulkWrite(chunk, { ordered: false });
     }
     const savedCount = rows.length;
+    const minRequired = Math.min(500, Math.floor(universe.length * 0.05));
+
+    if (savedCount < minRequired) {
+      const msg = `Only ${savedCount} quotes saved (need at least ${minRequired}). Yahoo may be rate-limiting this host — retry later or run sync from local.`;
+      await ScreenerSync.findOneAndUpdate(
+        { asOfDate },
+        {
+          status: 'failed',
+          completedAt: new Date(),
+          universeSize: universe.length,
+          savedCount,
+          nseCount,
+          bseCount,
+          errorMessage: msg,
+        }
+      );
+      throw new Error(msg);
+    }
 
     // Remove stale rows for this date not in latest pull (optional cleanup)
     const validSymbols = rows.map((r) => r.symbol);
@@ -120,13 +138,16 @@ async function runScreenerSync(options = {}) {
 }
 
 async function getLatestAsOfDate() {
-  const latest = await ScreenerSync.findOne({ status: 'completed' })
+  const stock = await MarketStock.findOne().sort({ asOfDate: -1 }).select('asOfDate').lean();
+  if (stock?.asOfDate) {
+    const n = await MarketStock.countDocuments({ asOfDate: stock.asOfDate });
+    if (n >= 100) return stock.asOfDate;
+  }
+
+  const latest = await ScreenerSync.findOne({ status: 'completed', savedCount: { $gte: 100 } })
     .sort({ asOfDate: -1 })
     .lean();
-  if (latest?.asOfDate) return latest.asOfDate;
-
-  const stock = await MarketStock.findOne().sort({ asOfDate: -1 }).select('asOfDate').lean();
-  return stock?.asOfDate || null;
+  return latest?.asOfDate || stock?.asOfDate || null;
 }
 
 async function ensureTodaySnapshot() {

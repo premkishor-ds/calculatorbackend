@@ -115,9 +115,34 @@ app.use(express.json());
 // MongoDB + daily screener snapshot (auto-sync if today's data is missing)
 async function initDatabase() {
   await connectMongo();
-  seedDefaultStocks();
+  await seedDefaultStocks();
+  await syncSimulatorSymbolsFromDb();
   scheduleScreenerCron();
   await ensureTodaySnapshot();
+}
+
+/** Register every watchlist symbol for live tick / alert / order simulation */
+async function syncSimulatorSymbolsFromDb() {
+  try {
+    const stocks = await Stock.find({}).select('symbol').lean();
+    let added = 0;
+    for (const { symbol } of stocks) {
+      if (!symbol || stockPrices[symbol]) continue;
+      const base = stockBaselines[symbol] ?? 400 + Math.random() * 1600;
+      stockPrices[symbol] = {
+        price: base,
+        change: 0,
+        changePercent: 0,
+        open: base,
+      };
+      added++;
+    }
+    if (added > 0) {
+      console.log(`[Simulator] Registered ${added} symbols from MongoDB (${Object.keys(stockPrices).length} total)`);
+    }
+  } catch (err) {
+    console.error('[Simulator] Failed to sync symbols from DB:', err.message);
+  }
 }
 
 // Predefined list of default symbols and their correct corporate names
@@ -505,13 +530,21 @@ app.post('/api/stocks', async (req, res) => {
     const wlName = (watchlist || 'default').trim();
     const favStatus = isFavourite !== undefined ? isFavourite : (isfavoute !== undefined ? isfavoute : false);
 
-    // Dynamic tick state seeding if not already baseline
     if (!stockPrices[formattedSymbol]) {
+      let seedPrice = stockBaselines[formattedSymbol] ?? 500.0;
+      try {
+        const { yahooFinance, YAHOO_OPTS } = require('./lib/yahoo-finance');
+        const q = await yahooFinance.quote(formattedSymbol, YAHOO_OPTS);
+        const live = q?.regularMarketPrice;
+        if (live && live > 0) seedPrice = live;
+      } catch {
+        /* use baseline fallback */
+      }
       stockPrices[formattedSymbol] = {
-        price: 500.0,
+        price: seedPrice,
         change: 0,
         changePercent: 0,
-        open: 500.0
+        open: seedPrice,
       };
     }
 
@@ -531,6 +564,7 @@ app.post('/api/stocks', async (req, res) => {
     });
 
     await newStock.save();
+    scheduleSimulatorSync();
     res.status(201).json(newStock);
   } catch (error) {
     if (error.code === 11000) {
@@ -539,6 +573,10 @@ app.post('/api/stocks', async (req, res) => {
     res.status(500).json({ error: 'Failed to add stock to database', details: error.message });
   }
 });
+
+function scheduleSimulatorSync() {
+  syncSimulatorSymbolsFromDb().catch(() => {});
+}
 
 // PATCH /api/stocks/:symbol - Update favourite or tags
 app.patch('/api/stocks/:symbol', async (req, res) => {
@@ -558,6 +596,9 @@ app.patch('/api/stocks/:symbol', async (req, res) => {
     await stock.save();
     res.json(stock);
   } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: error.message || 'Invalid stock data' });
+    }
     res.status(500).json({ error: 'Failed to update stock' });
   }
 });
@@ -948,9 +989,11 @@ app.get('/api/screener/meta', async (req, res) => {
     res.json({
       asOfDate,
       syncing: isSyncInProgress(),
-      status: sync?.status || (count > 0 ? 'completed' : 'pending'),
-      universeSize: sync?.universeSize || count,
-      savedCount: sync?.savedCount || count,
+      status:
+        sync?.status ||
+        (count > 100 ? 'completed' : count > 0 ? 'partial' : 'pending'),
+      universeSize: sync?.universeSize ?? 0,
+      savedCount: count > 0 ? count : (sync?.savedCount ?? 0),
       nseCount: sync?.nseCount || nseCount,
       bseCount: sync?.bseCount || bseCount,
       completedAt: sync?.completedAt || null,

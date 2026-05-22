@@ -31,7 +31,11 @@ const stockSchema = new mongoose.Schema({
     type: [String],
     default: [],
     validate: {
-      validator: (arr) => arr.every(t => VALID_TAGS.includes(t)),
+      validator: (arr) =>
+        arr.every(
+          (t) =>
+            VALID_TAGS.includes(t) || /^watchlist[1-5]$/.test(t)
+        ),
       message: 'Invalid tag value'
     }
   }
