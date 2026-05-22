@@ -533,8 +533,8 @@ app.post('/api/stocks', async (req, res) => {
     if (!stockPrices[formattedSymbol]) {
       let seedPrice = stockBaselines[formattedSymbol] ?? 500.0;
       try {
-        const { yahooFinance, YAHOO_OPTS } = require('./lib/yahoo-finance');
-        const q = await yahooFinance.quote(formattedSymbol, YAHOO_OPTS);
+        const { yahooFinance, YAHOO_MODULE_OPTS } = require('./lib/yahoo-finance');
+        const q = await yahooFinance.quote(formattedSymbol, {}, YAHOO_MODULE_OPTS);
         const live = q?.regularMarketPrice;
         if (live && live > 0) seedPrice = live;
       } catch {
