@@ -118,7 +118,10 @@ async function initDatabase() {
   await seedDefaultStocks();
   await syncSimulatorSymbolsFromDb();
   scheduleScreenerCron();
-  await ensureTodaySnapshot();
+  // Do not block HTTP — full sync can take 30–60+ min on Render
+  ensureTodaySnapshot().catch((err) => {
+    console.error('[ScreenerSync] Background startup sync failed:', err.message);
+  });
 }
 
 /** Register every watchlist symbol for live tick / alert / order simulation */
@@ -1069,16 +1072,16 @@ app.use((err, req, res, next) => {
 });
 
 async function boot() {
+  server.listen(PORT, () => {
+    console.log(`Vision backend server is running on http://localhost:${PORT}`);
+  });
+
   try {
     await initDatabase();
   } catch (err) {
     console.error('Database init failed:', err.message);
     console.warn('API running without MongoDB — screener endpoints will be empty until sync succeeds.');
   }
-
-  server.listen(PORT, () => {
-    console.log(`Vision backend server is running on http://localhost:${PORT}`);
-  });
 }
 
 boot();
