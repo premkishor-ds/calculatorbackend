@@ -14,6 +14,17 @@ const Alert = require('./models/Alert');
 const Order = require('./models/Order');
 const Position = require('./models/Position');
 const WorkspaceLayout = require('./models/WorkspaceLayout');
+const MarketStock = require('./models/MarketStock');
+const ScreenerSync = require('./models/ScreenerSync');
+const { buildScreenerQuery, buildSort } = require('./lib/screener-query');
+const {
+  runScreenerSync,
+  getLatestAsOfDate,
+  ensureTodaySnapshot,
+  isSyncInProgress,
+} = require('./services/screener-sync');
+const { connectMongo } = require('./lib/connect-mongo');
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -101,31 +112,13 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MongoDB Connection with Enterprise connection pooling & Self-Healing Local Fallback
-mongoose.connect(process.env.MONGODB_URI, {
-  maxPoolSize: 100,
-  minPoolSize: 10,
-  socketTimeoutMS: 45000,
-  serverSelectionTimeoutMS: 5000,
-})
-  .then(() => {
-    console.log('Successfully connected to MongoDB.');
-    seedDefaultStocks();
-  })
-  .catch((err) => {
-    console.error('MongoDB Atlas connection error:', err);
-    console.log('Attempting self-healing fallback to local MongoDB instance...');
-    mongoose.connect('mongodb://127.0.0.1:27017/vision_terminal', {
-      serverSelectionTimeoutMS: 3000
-    })
-      .then(() => {
-        console.log('Successfully connected to local fallback MongoDB.');
-        seedDefaultStocks();
-      })
-      .catch((localErr) => {
-        console.warn('Local MongoDB fallback also failed. Running in standalone Mode (endpoints will handle operations gracefully).');
-      });
-  });
+// MongoDB + daily screener snapshot (auto-sync if today's data is missing)
+async function initDatabase() {
+  await connectMongo();
+  seedDefaultStocks();
+  scheduleScreenerCron();
+  await ensureTodaySnapshot();
+}
 
 // Predefined list of default symbols and their correct corporate names
 const DEFAULT_STOCKS_SEED = [
@@ -903,13 +896,146 @@ app.delete('/api/workspace/layouts/:name', async (req, res) => {
   }
 });
 
+/* ── Screener (MongoDB daily snapshot) ─────────────────────── */
+
+function scheduleScreenerCron() {
+  // 4:30 PM IST Mon–Fri (after NSE close) — cron uses server TZ; adjust via SCREENER_CRON env
+  const expr = process.env.SCREENER_CRON || '30 11 * * 1-5';
+  cron.schedule(expr, () => {
+    runScreenerSync({ force: true }).catch((err) => {
+      console.error('[ScreenerCron] Daily sync failed:', err.message);
+    });
+  });
+  console.log(`Screener daily cron scheduled: ${expr}`);
+}
+
+function formatMarketStock(doc) {
+  return {
+    symbol: doc.symbol,
+    name: doc.name,
+    price: doc.price,
+    change: doc.change,
+    changePercent: doc.changePercent,
+    marketCap: doc.marketCap,
+    pe: doc.pe,
+    eps: doc.eps,
+    cmpBv: doc.cmpBv,
+    divYield: doc.divYield,
+    promHold: doc.promHold,
+    profitGrowth: doc.profitGrowth,
+    salesGrowth: doc.salesGrowth,
+    roe: doc.roe ?? undefined,
+    roa: doc.roa ?? undefined,
+    exchange: doc.exchange,
+    asOfDate: doc.asOfDate,
+  };
+}
+
+app.get('/api/screener/meta', async (req, res) => {
+  try {
+    const asOfDate = (await getLatestAsOfDate()) || null;
+    const sync = asOfDate
+      ? await ScreenerSync.findOne({ asOfDate }).lean()
+      : null;
+    const count = asOfDate ? await MarketStock.countDocuments({ asOfDate }) : 0;
+    const nseCount = asOfDate
+      ? await MarketStock.countDocuments({ asOfDate, exchange: 'NSE' })
+      : 0;
+    const bseCount = asOfDate
+      ? await MarketStock.countDocuments({ asOfDate, exchange: 'BSE' })
+      : 0;
+
+    res.json({
+      asOfDate,
+      syncing: isSyncInProgress(),
+      status: sync?.status || (count > 0 ? 'completed' : 'pending'),
+      universeSize: sync?.universeSize || count,
+      savedCount: sync?.savedCount || count,
+      nseCount: sync?.nseCount || nseCount,
+      bseCount: sync?.bseCount || bseCount,
+      completedAt: sync?.completedAt || null,
+      errorMessage: sync?.errorMessage || '',
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to read screener metadata' });
+  }
+});
+
+app.get('/api/screener', async (req, res) => {
+  try {
+    const asOfDate = (await getLatestAsOfDate()) || null;
+    if (!asOfDate) {
+      return res.json({
+        asOfDate: null,
+        total: 0,
+        count: 0,
+        stocks: [],
+        message: 'No screener snapshot yet. Run sync or wait for cron.',
+      });
+    }
+
+    const mongoQuery = buildScreenerQuery(req.query, asOfDate);
+    const sort = buildSort(req.query);
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10));
+    const limit = Math.min(
+      2000,
+      Math.max(1, parseInt(req.query.limit || '5000', 10))
+    );
+
+    const [total, docs] = await Promise.all([
+      MarketStock.countDocuments(mongoQuery),
+      MarketStock.find(mongoQuery)
+        .sort(sort)
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    res.json({
+      asOfDate,
+      exchange: req.query.exchange || 'all',
+      total,
+      offset,
+      limit,
+      count: docs.length,
+      stocks: docs.map(formatMarketStock),
+    });
+  } catch (err) {
+    console.error('Screener query failed:', err);
+    res.status(500).json({ error: 'Failed to query screener data' });
+  }
+});
+
+app.post('/api/screener/sync', async (req, res) => {
+  try {
+    const force = req.query.force === 'true' || req.body?.force === true;
+    if (isSyncInProgress()) {
+      return res.status(409).json({ error: 'Sync already in progress' });
+    }
+    const result = await runScreenerSync({ force });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Screener sync failed' });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled server error:', err);
   res.status(500).json({ error: 'Internal server error occurred' });
 });
 
-// Start the server
-server.listen(PORT, () => {
-  console.log(`Vision backend server is running on http://localhost:${PORT}`);
-});
+async function boot() {
+  try {
+    await initDatabase();
+  } catch (err) {
+    console.error('Database init failed:', err.message);
+    console.warn('API running without MongoDB — screener endpoints will be empty until sync succeeds.');
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Vision backend server is running on http://localhost:${PORT}`);
+  });
+}
+
+boot();

@@ -20,6 +20,9 @@
 # production
 /build
 
+# local embedded Mongo (dev fallback)
+.mongo-data/
+
 # misc
 .DS_Store
 *.pem
