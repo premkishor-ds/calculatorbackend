@@ -11,8 +11,7 @@ const CustomTag = require('./models/CustomTag');
 const Watchlist = require('./models/Watchlist');
 const Drawing = require('./models/Drawing');
 const Alert = require('./models/Alert');
-const Order = require('./models/Order');
-const Position = require('./models/Position');
+
 const WorkspaceLayout = require('./models/WorkspaceLayout');
 const MarketStock = require('./models/MarketStock');
 const ScreenerSync = require('./models/ScreenerSync');
@@ -263,19 +262,13 @@ for (const symbol in stockBaselines) {
   };
 }
 
-// Paper Trading Account global state
-let virtualBalance = 1000000.0;
-
 /* ── WebSocket Setup & Simulator Loop ──────────────────────── */
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws) => {
   console.log('Client connected to WebSocket stream');
-  
-  // Send active balance upon connecting
-  ws.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
-  
+    
   ws.on('message', (message) => {
     try {
       const parsed = JSON.parse(message);
@@ -340,9 +333,8 @@ setInterval(async () => {
       }
     });
 
-    // Check matches for Alerts & Pending Paper Orders
+    // Check matches for Alerts
     await checkAlertsForSymbol(symbol, data.price);
-    await checkOrdersForSymbol(symbol, data.price);
   }
 }, 1000);
 
@@ -384,68 +376,7 @@ async function checkAlertsForSymbol(symbol, currentPrice) {
   }
 }
 
-async function checkOrdersForSymbol(symbol, currentPrice) {
-  try {
-    const pending = await Order.find({ symbol, status: 'pending' });
-    for (const order of pending) {
-      let fill = false;
-      if (order.type === 'limit') {
-        if (order.side === 'buy' && currentPrice <= order.price) fill = true;
-        if (order.side === 'sell' && currentPrice >= order.price) fill = true;
-      }
 
-      if (fill) {
-        order.status = 'filled';
-        order.filledAt = new Date();
-        await order.save();
-
-        let pos = await Position.findOne({ symbol });
-        if (order.side === 'buy') {
-          const totalCost = (pos ? (pos.averagePrice * pos.quantity) : 0) + (order.price * order.quantity);
-          const totalQty = (pos ? pos.quantity : 0) + order.quantity;
-          if (!pos) {
-            pos = new Position({
-              symbol,
-              side: 'buy',
-              averagePrice: order.price,
-              quantity: order.quantity
-            });
-          } else {
-            pos.averagePrice = parseFloat((totalCost / totalQty).toFixed(2));
-            pos.quantity = totalQty;
-          }
-          virtualBalance = parseFloat((virtualBalance - (order.price * order.quantity)).toFixed(2));
-        } else { // sell
-          if (pos) {
-            const qtyFilled = Math.min(pos.quantity, order.quantity);
-            const profit = parseFloat(((order.price - pos.averagePrice) * qtyFilled).toFixed(2));
-            pos.quantity -= qtyFilled;
-            pos.realizedPnL = parseFloat((pos.realizedPnL + profit).toFixed(2));
-            virtualBalance = parseFloat((virtualBalance + (order.price * order.quantity)).toFixed(2));
-            if (pos.quantity === 0) {
-              await Position.findByIdAndDelete(pos._id);
-              pos = null;
-            }
-          }
-        }
-
-        if (pos) await pos.save();
-
-        const execMsg = JSON.stringify({
-          type: 'order_filled',
-          order,
-          position: pos,
-          balance: virtualBalance
-        });
-        wss.clients.forEach(c => {
-          if (c.readyState === 1) c.send(execMsg);
-        });
-      }
-    }
-  } catch (err) {
-    console.error('Order matching engine execution failure:', err);
-  }
-}
 
 /* ── API Routes ────────────────────────────────────────────── */
 
@@ -701,158 +632,7 @@ app.post('/api/drawings/sync', async (req, res) => {
   }
 });
 
-/* ── Paper Trading Panel API Endpoints ─────────────────────── */
 
-// GET /api/trading/portfolio - Retrieve account balance
-app.get('/api/trading/portfolio', (req, res) => {
-  res.json({ balance: virtualBalance });
-});
-
-// POST /api/trading/portfolio/reset - Reset paper trading account balance & clear ledger
-app.post('/api/trading/portfolio/reset', async (req, res) => {
-  try {
-    virtualBalance = 1000000.0;
-    await Position.deleteMany({});
-    await Order.deleteMany({});
-    
-    // Broadcast reset to connected sockets
-    wss.clients.forEach(c => {
-      if (c.readyState === 1) {
-        c.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
-      }
-    });
-    
-    res.json({ message: 'Paper trading account reset successfully', balance: virtualBalance });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to reset paper account' });
-  }
-});
-
-// GET /api/trading/positions - Retrieve all open virtual positions
-app.get('/api/trading/positions', async (req, res) => {
-  try {
-    const positions = await Position.find({});
-    // Attach current pricing dynamically
-    const updated = positions.map(pos => {
-      const live = stockPrices[pos.symbol]?.price || pos.averagePrice;
-      const profit = parseFloat(((live - pos.averagePrice) * pos.quantity * (pos.side === 'buy' ? 1 : -1)).toFixed(2));
-      return {
-        ...pos.toObject(),
-        currentPrice: live,
-        unrealizedPnL: profit
-      };
-    });
-    res.json(updated);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to retrieve holdings' });
-  }
-});
-
-// GET /api/trading/orders - Retrieve complete order history log
-app.get('/api/trading/orders', async (req, res) => {
-  try {
-    const orders = await Order.find({}).sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to retrieve orders' });
-  }
-});
-
-// POST /api/trading/orders - Create trade orders (Market/Limit execution)
-app.post('/api/trading/orders', async (req, res) => {
-  try {
-    const { symbol, side, type, price, quantity } = req.body;
-    if (!symbol) return res.status(400).json({ error: 'Symbol is required' });
-    if (!side || !['buy', 'sell'].includes(side)) return res.status(400).json({ error: 'Side must be buy/sell' });
-    if (!type || !['market', 'limit'].includes(type)) return res.status(400).json({ error: 'Type must be market/limit' });
-    if (!quantity || quantity <= 0) return res.status(400).json({ error: 'Invalid quantity' });
-
-    const symUpper = symbol.trim().toUpperCase();
-    const livePrice = stockPrices[symUpper]?.price || 500.0;
-    const executionPrice = type === 'market' ? livePrice : parseFloat(Number(price).toFixed(2));
-
-    if (type === 'market') {
-      // Execute fill instantly!
-      if (side === 'buy') {
-        const cost = executionPrice * quantity;
-        if (cost > virtualBalance) return res.status(400).json({ error: 'Insufficient virtual cash balance' });
-        
-        let pos = await Position.findOne({ symbol: symUpper });
-        if (!pos) {
-          pos = new Position({ symbol: symUpper, side: 'buy', averagePrice: executionPrice, quantity });
-        } else {
-          const totalCost = (pos.averagePrice * pos.quantity) + cost;
-          pos.quantity += quantity;
-          pos.averagePrice = parseFloat((totalCost / pos.quantity).toFixed(2));
-        }
-        await pos.save();
-        virtualBalance = parseFloat((virtualBalance - cost).toFixed(2));
-      } else { // sell
-        let pos = await Position.findOne({ symbol: symUpper });
-        if (!pos || pos.quantity < quantity) return res.status(400).json({ error: 'Holdings insufficient for sell order' });
-        
-        const profit = parseFloat(((executionPrice - pos.averagePrice) * quantity).toFixed(2));
-        pos.quantity -= quantity;
-        pos.realizedPnL = parseFloat((pos.realizedPnL + profit).toFixed(2));
-        virtualBalance = parseFloat((virtualBalance + (executionPrice * quantity)).toFixed(2));
-        
-        if (pos.quantity === 0) {
-          await Position.findByIdAndDelete(pos._id);
-        } else {
-          await pos.save();
-        }
-      }
-
-      const completedOrder = new Order({
-        symbol: symUpper,
-        side,
-        type,
-        price: executionPrice,
-        quantity,
-        status: 'filled',
-        filledAt: new Date()
-      });
-      await completedOrder.save();
-
-      // Broadcast update
-      wss.clients.forEach(c => {
-        if (c.readyState === 1) {
-          c.send(JSON.stringify({ type: 'portfolio_update', balance: virtualBalance }));
-        }
-      });
-
-      return res.status(201).json({ order: completedOrder, balance: virtualBalance });
-    } else {
-      // Limit order - post to pending order book
-      const pendingOrder = new Order({
-        symbol: symUpper,
-        side,
-        type,
-        price: executionPrice,
-        quantity,
-        status: 'pending'
-      });
-      await pendingOrder.save();
-      return res.status(201).json({ order: pendingOrder, balance: virtualBalance });
-    }
-  } catch (err) {
-    res.status(500).json({ error: 'Order placement failed', details: err.message });
-  }
-});
-
-// DELETE /api/trading/orders/:id - Cancel working limit order
-app.delete('/api/trading/orders/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const order = await Order.findOne({ _id: id, status: 'pending' });
-    if (!order) return res.status(404).json({ error: 'Pending order not found' });
-    order.status = 'cancelled';
-    await order.save();
-    res.json({ message: 'Order successfully cancelled', order });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to cancel order' });
-  }
-});
 
 /* ── Alert System API Endpoints ────────────────────────────── */
 
