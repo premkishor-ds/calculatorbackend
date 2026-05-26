@@ -805,7 +805,7 @@ app.get('/api/screener', async (req, res) => {
     const offset = Math.max(0, parseInt(req.query.offset || '0', 10));
     const limit = Math.min(
       2000,
-      Math.max(1, parseInt(req.query.limit || '5000', 10))
+      Math.max(1, parseInt(req.query.limit || '2000', 10))
     );
 
     const [total, docs] = await Promise.all([
@@ -838,8 +838,12 @@ app.post('/api/screener/sync', async (req, res) => {
     if (isSyncInProgress()) {
       return res.status(409).json({ error: 'Sync already in progress' });
     }
-    const result = await runScreenerSync({ force });
-    res.json(result);
+    // Respond immediately — sync runs in the background to avoid holding the HTTP connection open
+    // (a full sync can take 30–60+ minutes on cold start)
+    res.status(202).json({ message: 'Screener sync started in background', force });
+    runScreenerSync({ force }).catch((err) => {
+      console.error('[ScreenerSync] Background sync failed:', err.message);
+    });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Screener sync failed' });
   }
