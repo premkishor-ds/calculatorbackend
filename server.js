@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
@@ -11,10 +11,11 @@ const CustomTag = require('./models/CustomTag');
 const Watchlist = require('./models/Watchlist');
 const Drawing = require('./models/Drawing');
 const Alert = require('./models/Alert');
-
 const WorkspaceLayout = require('./models/WorkspaceLayout');
 const MarketStock = require('./models/MarketStock');
 const ScreenerSync = require('./models/ScreenerSync');
+const Holding = require('./models/Holding');
+
 const { buildScreenerQuery, buildSort } = require('./lib/screener-query');
 const {
   runScreenerSync,
@@ -6059,6 +6060,65 @@ app.post('/api/screener/sync', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Screener sync failed' });
+  }
+});
+
+/* ── Holdings & Live Portfolio Tracker ─────────────────────── */
+app.get('/api/holdings', async (req, res) => {
+  try {
+    const list = await Holding.find({}).lean();
+    
+    // Enrich with live price from Yahoo Finance
+    const { yahooFinance, YAHOO_MODULE_OPTS } = require('./lib/yahoo-finance');
+    const enriched = await Promise.all(
+      list.map(async (h) => {
+        let currentPrice = h.buyPrice;
+        try {
+          const q = await yahooFinance.quote(h.symbol, {}, YAHOO_MODULE_OPTS);
+          if (q?.regularMarketPrice) {
+            currentPrice = q.regularMarketPrice;
+          }
+        } catch { /* use buyPrice fallback */ }
+        return {
+          ...h,
+          currentPrice,
+        };
+      })
+    );
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch holdings list' });
+  }
+});
+
+app.post('/api/holdings', async (req, res) => {
+  try {
+    const { symbol, name, buyPrice, quantity, purchaseDate, watchlist } = req.body;
+    if (!symbol || !name || !buyPrice || !quantity) {
+      return res.status(400).json({ error: 'Required attributes: symbol, name, buyPrice, quantity' });
+    }
+    const item = new Holding({
+      symbol: symbol.trim().toUpperCase(),
+      name: name.trim(),
+      buyPrice: parseFloat(buyPrice),
+      quantity: parseInt(quantity, 10),
+      purchaseDate: purchaseDate ? new Date(purchaseDate) : undefined,
+      watchlist: watchlist || 'default',
+    });
+    await item.save();
+    res.status(201).json(item);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to record stock holding transaction' });
+  }
+});
+
+app.delete('/api/holdings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await Holding.findByIdAndDelete(id);
+    res.json({ message: 'Holding transaction deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete holding transaction' });
   }
 });
 
