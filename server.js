@@ -5674,6 +5674,77 @@ app.delete('/api/watchlists/:name', async (req, res) => {
   }
 });
 
+// PUT /api/watchlists/:name - Rename a watchlist
+app.put('/api/watchlists/:name', async (req, res) => {
+  try {
+    const nameParam = req.params.name.trim();
+    const { name: newName } = req.body;
+    if (!newName || !newName.trim()) {
+      return res.status(400).json({ error: 'New watchlist name is required' });
+    }
+    const cleanNew = newName.trim();
+
+    const wl = await Watchlist.findOne({ name: nameParam });
+    if (!wl) return res.status(404).json({ error: 'Watchlist not found' });
+
+    if (wl.isDefault || wl.name.toLowerCase() === 'default') {
+      return res.status(400).json({ error: 'The default watchlist cannot be renamed' });
+    }
+
+    // Check for duplicates (case-insensitive)
+    const escapedNew = cleanNew.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const dup = await Watchlist.findOne({ name: { $regex: new RegExp(`^${escapedNew}$`, 'i') } });
+    if (dup && dup._id.toString() !== wl._id.toString()) {
+      return res.status(400).json({ error: 'A watchlist with this name already exists' });
+    }
+
+    const oldName = wl.name;
+    wl.name = cleanNew;
+    await wl.save();
+
+    // Cascade rename to all stocks in this watchlist
+    await Stock.updateMany({ watchlist: oldName }, { $set: { watchlist: cleanNew } });
+
+    res.json(wl);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to rename watchlist', details: err.message });
+  }
+});
+
+// GET /api/stocks/search - Server-side paginated stock search
+app.get('/api/stocks/search', async (req, res) => {
+  try {
+    const { q, watchlist, page = '1', limit = '50' } = req.query;
+    const wlName = (watchlist || 'default').trim();
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const skip = (pageNum - 1) * limitNum;
+
+    let filter = { watchlist: wlName };
+    if (q && q.trim()) {
+      const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { symbol: { $regex: escaped, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } }
+      ];
+    }
+
+    const [stocks, total] = await Promise.all([
+      Stock.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limitNum).lean(),
+      Stock.countDocuments(filter)
+    ]);
+
+    res.json({
+      stocks,
+      total,
+      page: pageNum,
+      totalPages: Math.ceil(total / limitNum)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Search failed', details: err.message });
+  }
+});
+
 // GET /api/stocks - Fetch all stocks for a specific watchlist
 app.get('/api/stocks', async (req, res) => {
   try {

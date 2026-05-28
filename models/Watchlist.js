@@ -7,6 +7,11 @@ const watchlistSchema = new mongoose.Schema({
     trim: true,
     unique: true
   },
+  description: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   isDefault: {
     type: Boolean,
     default: false

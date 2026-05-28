@@ -1,11 +1,5 @@
 const mongoose = require('mongoose');
 
-const VALID_TAGS = [
-  'favourite', 'nextbuy', 'bullish', 'currentlyinvested',
-  'watchclosely', 'highconviction', 'swingplay', 'longterm',
-  'avoid', 'researching', 'takingprofit', 'undervalued'
-];
-
 const stockSchema = new mongoose.Schema({
   symbol: {
     type: String,
@@ -32,18 +26,17 @@ const stockSchema = new mongoose.Schema({
     default: [],
     validate: {
       validator: (arr) =>
-        arr.every(
-          (t) =>
-            VALID_TAGS.includes(t) || /^watchlist[1-5]$/.test(t)
-        ),
-      message: 'Invalid tag value'
+        Array.isArray(arr) && arr.length <= 20 && arr.every(t => typeof t === 'string' && t.length <= 50),
+      message: 'Tags must be an array of up to 20 strings (max 50 chars each)'
     }
   }
 }, {
   timestamps: true
 });
 
-// Set compound unique index so a symbol can only exist once per watchlist
+// Compound unique index — a symbol can only exist once per watchlist
 stockSchema.index({ watchlist: 1, symbol: 1 }, { unique: true });
+// Text index for server-side search
+stockSchema.index({ symbol: 'text', name: 'text' });
 
 module.exports = mongoose.model('Stock', stockSchema);
