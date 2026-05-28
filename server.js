@@ -5474,8 +5474,9 @@ async function seedDefaultStocks() {
     }
 
     const count = await Stock.countDocuments({ watchlist: 'default' });
-    if (count === 0) {
-      console.log('Stock collection for default watchlist is empty. Seeding default stock list...');
+    if (count < 5000) {
+      console.log(`Stock collection for default watchlist has ${count} stocks. Seeding full stock list...`);
+      await Stock.deleteMany({ watchlist: 'default' });
       await Stock.insertMany(DEFAULT_STOCKS_SEED.map(item => ({
         symbol: item.symbol,
         name: item.name,
