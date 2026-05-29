@@ -5,6 +5,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { setupSwagger } = require('./swagger');
 
 // Import Schemas
 const Stock = require('./models/Stock');
@@ -40,7 +41,12 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   // Content Security Policy for API requests
-  res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none';");
+  if (!req.path.startsWith('/api-docs') && req.path !== '/swagger-custom.js') {
+    res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none';");
+  } else {
+    // Relaxed Content-Security-Policy so that Swagger UI styles, scripts, and fonts load correctly
+    res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: https://*; img-src 'self' data: https://*; style-src 'self' 'unsafe-inline' https://*; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*;");
+  }
   next();
 });
 
@@ -113,6 +119,8 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+setupSwagger(app);
+app.get('/swagger-custom.js', (req, res) => res.sendFile(__dirname + '/swagger-custom.js'));
 
 // MongoDB + daily screener snapshot (auto-sync if today's data is missing)
 async function initDatabase() {
@@ -5667,6 +5675,22 @@ async function checkAlertsForSymbol(symbol, currentPrice) {
 
 
 
+/**
+ * @openapi
+ * /api/watchlists:
+ *   get:
+ *     summary: Retrieve user watchlists
+ *     description: Fetches a list of all watchlists owned by the authenticated user, or pre-seeded default watchlists if guest/unauthenticated.
+ *     responses:
+ *       200:
+ *         description: A list of watchlists.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Watchlist'
+ */
 // GET /api/watchlists - Fetch all watchlists (Secure User-Bound & Guest fallback)
 app.get('/api/watchlists', parseUserMiddleware, async (req, res) => {
   try {
@@ -6934,6 +6958,22 @@ app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /api/corporate-actions:
+ *   get:
+ *     summary: Get corporate actions feed
+ *     description: Retrieve dynamic corporate actions (dividends, stock splits, bonus shares, and buybacks) based on the user's holdings and watchlists.
+ *     responses:
+ *       200:
+ *         description: List of corporate actions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/CorporateAction'
+ */
 // GET /api/corporate-actions - Retrieve dynamic corporate actions based on watchlist / holdings symbols
 app.get('/api/corporate-actions', parseUserMiddleware, async (req, res) => {
   try {
