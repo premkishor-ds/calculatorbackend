@@ -44,6 +44,20 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date,
   },
+  loginAttempts: {
+    type: Number,
+    required: true,
+    default: 0
+  },
+  lockUntil: {
+    type: Number
+  },
+  activeSessions: [{
+    token: { type: String },
+    deviceInfo: { type: String },
+    ipAddress: { type: String },
+    lastActive: { type: Date, default: Date.now }
+  }]
 }, {
   timestamps: true,
 });

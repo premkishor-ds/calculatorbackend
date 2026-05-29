@@ -36,6 +36,24 @@ const HoldingSchema = new mongoose.Schema({
     type: String,
     default: 'default',
     trim: true,
+  },
+  transactionType: {
+    type: String,
+    enum: ['buy', 'sell', 'dividend', 'bonus', 'split'],
+    default: 'buy',
+    lowercase: true
+  },
+  brokerageFees: {
+    type: Number,
+    default: 0
+  },
+  standardTaxes: {
+    type: Number,
+    default: 0
+  },
+  realizedPnL: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true
