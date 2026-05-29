@@ -16,6 +16,7 @@ const WorkspaceLayout = require('./models/WorkspaceLayout');
 const MarketStock = require('./models/MarketStock');
 const ScreenerSync = require('./models/ScreenerSync');
 const Holding = require('./models/Holding');
+const Notification = require('./models/Notification');
 
 const { buildScreenerQuery, buildSort } = require('./lib/screener-query');
 const {
@@ -5590,6 +5591,56 @@ async function checkAlertsForSymbol(symbol, currentPrice) {
         alert.triggeredAt = new Date();
         await alert.save();
 
+        // Persist in-app notification for this user
+        try {
+          if (alert.userId) {
+            const condLabel = alert.condition.replace(/_/g, ' ');
+            await new Notification({
+              userId: alert.userId,
+              title: `Alert Triggered: ${alert.symbol.split('.')[0]}`,
+              message: `${alert.symbol} ${condLabel} ₹${alert.value} — triggered at ₹${currentPrice.toFixed(2)}`,
+              type: 'alert',
+              metadata: {
+                alertId: alert._id,
+                symbol: alert.symbol,
+                condition: alert.condition,
+                targetValue: alert.value,
+                triggeredPrice: currentPrice
+              }
+            }).save();
+          }
+        } catch (notifErr) {
+          console.error('Failed to persist alert notification:', notifErr);
+        }
+
+        // Dispatch webhook if delivery is webhook
+        if (alert.delivery === 'webhook') {
+          try {
+            const webhookUrl = process.env.ALERT_WEBHOOK_URL;
+            if (webhookUrl) {
+              fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  event: 'alert_triggered',
+                  symbol: alert.symbol,
+                  condition: alert.condition,
+                  value: alert.value,
+                  currentPrice,
+                  triggeredAt: alert.triggeredAt
+                })
+              }).catch(e => console.error('Webhook dispatch failed:', e));
+            }
+          } catch (whErr) {
+            console.error('Webhook dispatch error:', whErr);
+          }
+        }
+
+        // Log email delivery placeholder (implement SMTP transport when credentials are configured)
+        if (alert.delivery === 'email') {
+          console.log(`[AlertEmail] Would send email for ${alert.symbol} ${alert.condition} ₹${alert.value} to userId=${alert.userId}`);
+        }
+
         const alertMsg = JSON.stringify({
           type: 'alert_triggered',
           alert: {
@@ -6540,6 +6591,64 @@ app.put('/api/auth/profile', authMiddleware, async (req, res) => {
     res.json({ message: 'Profile updated successfully' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+/* ── Notification Center API Endpoints (Secure User-Bound) ── */
+
+// GET /api/notifications - Fetch all notifications for user
+app.get('/api/notifications', authMiddleware, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '50', 10)));
+    const list = await Notification.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
+    res.json({ notifications: list, unreadCount });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load notifications' });
+  }
+});
+
+// PUT /api/notifications/:id/read - Mark a single notification as read
+app.put('/api/notifications/:id/read', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const notif = await Notification.findOneAndUpdate(
+      { _id: id, userId: req.user._id },
+      { isRead: true },
+      { new: true }
+    );
+    if (!notif) return res.status(404).json({ error: 'Notification not found' });
+    res.json(notif);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark notification as read' });
+  }
+});
+
+// PUT /api/notifications/read-all - Mark all notifications as read
+app.put('/api/notifications/read-all', authMiddleware, async (req, res) => {
+  try {
+    await Notification.updateMany(
+      { userId: req.user._id, isRead: false },
+      { isRead: true }
+    );
+    res.json({ message: 'All notifications marked as read' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark all notifications as read' });
+  }
+});
+
+// DELETE /api/notifications/:id - Delete a notification
+app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await Notification.findOneAndDelete({ _id: id, userId: req.user._id });
+    if (!deleted) return res.status(404).json({ error: 'Notification not found or unauthorized' });
+    res.json({ message: 'Notification deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete notification' });
   }
 });
 
