@@ -5838,6 +5838,57 @@ app.delete('/api/stocks/:symbol', async (req, res) => {
   }
 });
 
+/* ── Drawings API Routes ───────────────────────────────────── */
+
+// GET /api/drawings - Fetch drawings for a specific symbol & chartMode
+app.get('/api/drawings', async (req, res) => {
+  try {
+    const symbolParam = (req.query.symbol || '').trim().toUpperCase();
+    const chartMode = (req.query.chartMode || 'price').trim();
+    if (!symbolParam) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+    const drawings = await Drawing.find({ symbol: symbolParam, chartMode });
+    res.json(drawings);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to retrieve drawings', details: error.message });
+  }
+});
+
+// POST /api/drawings - Save drawings for a specific symbol & chartMode (overwrite existing)
+app.post('/api/drawings', async (req, res) => {
+  try {
+    const symbolParam = (req.body.symbol || '').trim().toUpperCase();
+    const chartMode = (req.body.chartMode || 'price').trim();
+    const drawingsList = req.body.drawings || [];
+
+    if (!symbolParam) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+
+    // Atomically overwrite previous drawings
+    await Drawing.deleteMany({ symbol: symbolParam, chartMode });
+
+    if (drawingsList.length > 0) {
+      const drawingsToSave = drawingsList.map((d) => ({
+        symbol: symbolParam,
+        chartMode,
+        type: d.type,
+        points: d.points,
+        price: d.price,
+        time: d.time,
+        color: d.color,
+        config: d.config
+      }));
+      await Drawing.insertMany(drawingsToSave);
+    }
+
+    res.json({ message: 'Drawings synced successfully', count: drawingsList.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to sync drawings', details: error.message });
+  }
+});
+
 /* ── Custom Tag Routes ─────────────────────────────────────── */
 const DEFAULT_CUSTOM_TAGS = [
   { tagId: 'watchlist1', label: 'Watchlist 1', color: '#f97316' },

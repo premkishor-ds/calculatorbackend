@@ -14,7 +14,6 @@ const drawingSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['trendline', 'horizontal', 'vertical'],
     required: [true, 'Drawing type is required']
   },
   points: [{
@@ -30,6 +29,10 @@ const drawingSchema = new mongoose.Schema({
   color: {
     type: String,
     default: '#22c55e'
+  },
+  config: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
   }
 }, {
   timestamps: true
