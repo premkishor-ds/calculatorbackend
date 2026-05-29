@@ -5613,23 +5613,35 @@ async function checkAlertsForSymbol(symbol, currentPrice) {
 
 /* ── API Routes ────────────────────────────────────────────── */
 
-// GET /api/watchlists - Fetch all watchlists
-app.get('/api/watchlists', async (req, res) => {
+
+
+// GET /api/watchlists - Fetch all watchlists (Secure User-Bound & Guest fallback)
+app.get('/api/watchlists', parseUserMiddleware, async (req, res) => {
   try {
-    let lists = await Watchlist.find({}).sort({ isDefault: -1, createdAt: 1 });
-    if (lists.length === 0) {
-      const def = new Watchlist({ name: 'default', isDefault: true });
+    const filter = {};
+    if (req.user) {
+      filter.userId = req.user._id;
+    } else {
+      filter.userId = null; // Guests get standard predefined lists
+    }
+
+    let lists = await Watchlist.find(filter).sort({ isDefault: -1, createdAt: 1 });
+    
+    // Auto-create default watchlist for logged-in user if empty
+    if (lists.length === 0 && req.user) {
+      const def = new Watchlist({ userId: req.user._id, name: 'default', isDefault: true });
       await def.save();
       lists = [def];
     }
+    
     res.json(lists);
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve watchlists' });
   }
 });
 
-// POST /api/watchlists - Create a custom watchlist
-app.post('/api/watchlists', async (req, res) => {
+// POST /api/watchlists - Create a custom watchlist (Secure User-Bound)
+app.post('/api/watchlists', authMiddleware, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name || !name.trim()) {
@@ -5637,12 +5649,15 @@ app.post('/api/watchlists', async (req, res) => {
     }
     const cleanName = name.trim();
     const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const existing = await Watchlist.findOne({ name: { $regex: new RegExp(`^${escapedName}$`, 'i') } });
+    const existing = await Watchlist.findOne({ 
+      name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
+      userId: req.user._id 
+    });
     if (existing) {
       return res.status(400).json({ error: 'A watchlist with this name already exists' });
     }
 
-    const wl = new Watchlist({ name: cleanName, isDefault: false });
+    const wl = new Watchlist({ userId: req.user._id, name: cleanName, isDefault: false });
     await wl.save();
     res.status(201).json(wl);
   } catch (err) {
@@ -5650,32 +5665,29 @@ app.post('/api/watchlists', async (req, res) => {
   }
 });
 
-// DELETE /api/watchlists/:name - Delete a custom watchlist
-app.delete('/api/watchlists/:name', async (req, res) => {
+// DELETE /api/watchlists/:name - Delete a custom watchlist (Secure User-Bound)
+app.delete('/api/watchlists/:name', authMiddleware, async (req, res) => {
   try {
     const nameParam = req.params.name.trim();
-    const wl = await Watchlist.findOne({ name: nameParam });
+    const wl = await Watchlist.findOne({ name: nameParam, userId: req.user._id });
     if (!wl) return res.status(404).json({ error: 'Watchlist not found' });
     
     if (wl.isDefault || wl.name.toLowerCase() === 'default') {
       return res.status(400).json({ error: 'The default watchlist cannot be deleted' });
     }
 
-    const stocksInWatchlist = await Stock.find({ watchlist: wl.name });
-    const symbols = stocksInWatchlist.map(s => s.symbol);
-    await Stock.deleteMany({ watchlist: wl.name });
-    if (symbols.length > 0) {
-      await Drawing.deleteMany({ symbol: { $in: symbols } });
-    }
+    // Delete all associated stocks for this user
+    await Stock.deleteMany({ watchlist: wl.name, userId: req.user._id });
     await Watchlist.findByIdAndDelete(wl._id);
-    res.json({ message: `Watchlist '${wl.name}', associated stocks, and drawings successfully deleted` });
+    
+    res.json({ message: `Watchlist '${wl.name}' successfully deleted` });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete watchlist', details: err.message });
   }
 });
 
-// PUT /api/watchlists/:name - Rename a watchlist
-app.put('/api/watchlists/:name', async (req, res) => {
+// PUT /api/watchlists/:name - Rename a watchlist (Secure User-Bound)
+app.put('/api/watchlists/:name', authMiddleware, async (req, res) => {
   try {
     const nameParam = req.params.name.trim();
     const { name: newName } = req.body;
@@ -5684,7 +5696,7 @@ app.put('/api/watchlists/:name', async (req, res) => {
     }
     const cleanNew = newName.trim();
 
-    const wl = await Watchlist.findOne({ name: nameParam });
+    const wl = await Watchlist.findOne({ name: nameParam, userId: req.user._id });
     if (!wl) return res.status(404).json({ error: 'Watchlist not found' });
 
     if (wl.isDefault || wl.name.toLowerCase() === 'default') {
@@ -5693,7 +5705,10 @@ app.put('/api/watchlists/:name', async (req, res) => {
 
     // Check for duplicates (case-insensitive)
     const escapedNew = cleanNew.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const dup = await Watchlist.findOne({ name: { $regex: new RegExp(`^${escapedNew}$`, 'i') } });
+    const dup = await Watchlist.findOne({ 
+      name: { $regex: new RegExp(`^${escapedNew}$`, 'i') },
+      userId: req.user._id 
+    });
     if (dup && dup._id.toString() !== wl._id.toString()) {
       return res.status(400).json({ error: 'A watchlist with this name already exists' });
     }
@@ -5702,8 +5717,8 @@ app.put('/api/watchlists/:name', async (req, res) => {
     wl.name = cleanNew;
     await wl.save();
 
-    // Cascade rename to all stocks in this watchlist
-    await Stock.updateMany({ watchlist: oldName }, { $set: { watchlist: cleanNew } });
+    // Cascade rename to all stocks in this watchlist for this user
+    await Stock.updateMany({ watchlist: oldName, userId: req.user._id }, { $set: { watchlist: cleanNew } });
 
     res.json(wl);
   } catch (err) {
@@ -5745,19 +5760,29 @@ app.get('/api/stocks/search', async (req, res) => {
   }
 });
 
-// GET /api/stocks - Fetch all stocks for a specific watchlist
-app.get('/api/stocks', async (req, res) => {
+
+
+
+
+// GET /api/stocks - Fetch all stocks for a specific watchlist (Secure & Guest support)
+app.get('/api/stocks', parseUserMiddleware, async (req, res) => {
   try {
     const watchlistName = req.query.watchlist || 'default';
-    const stocks = await Stock.find({ watchlist: watchlistName }).sort({ updatedAt: -1 });
+    const filter = { watchlist: watchlistName };
+    if (req.user) {
+      filter.userId = req.user._id;
+    } else {
+      filter.userId = null; // Guests get standard seeds
+    }
+    const stocks = await Stock.find(filter).sort({ updatedAt: -1 });
     res.json(stocks);
   } catch (error) {
     res.status(500).json({ error: 'Failed to retrieve stocks from database' });
   }
 });
 
-// POST /api/stocks - Add a new stock to a specific watchlist
-app.post('/api/stocks', async (req, res) => {
+// POST /api/stocks - Add a new stock to a specific watchlist (Secure User-Bound)
+app.post('/api/stocks', authMiddleware, async (req, res) => {
   try {
     let { symbol, name, isFavourite, isfavoute, watchlist } = req.body;
     if (!symbol) return res.status(400).json({ error: 'Stock symbol is required' });
@@ -5770,7 +5795,11 @@ app.post('/api/stocks', async (req, res) => {
 
     await registerSymbolInSimulator(formattedSymbol);
 
-    let existingStock = await Stock.findOne({ symbol: formattedSymbol, watchlist: wlName });
+    let existingStock = await Stock.findOne({ 
+      symbol: formattedSymbol, 
+      watchlist: wlName, 
+      userId: req.user._id 
+    });
     if (existingStock) {
       existingStock.name = formattedName;
       existingStock.isFavourite = favStatus;
@@ -5779,6 +5808,7 @@ app.post('/api/stocks', async (req, res) => {
     }
 
     const newStock = new Stock({
+      userId: req.user._id,
       symbol: formattedSymbol,
       name: formattedName,
       isFavourite: favStatus,
@@ -5798,14 +5828,14 @@ app.post('/api/stocks', async (req, res) => {
 
 function scheduleSimulatorSync() { /* no-op — symbols registered on-demand */ }
 
-// PATCH /api/stocks/:symbol - Update favourite or tags
-app.patch('/api/stocks/:symbol', async (req, res) => {
+// PATCH /api/stocks/:symbol - Update favourite or tags (Secure User-Bound)
+app.patch('/api/stocks/:symbol', authMiddleware, async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
     const wlName = (req.body.watchlist || req.query.watchlist || 'default').trim();
     const { isFavourite, isfavoute, tags } = req.body;
 
-    const stock = await Stock.findOne({ symbol: symbolParam, watchlist: wlName });
+    const stock = await Stock.findOne({ symbol: symbolParam, watchlist: wlName, userId: req.user._id });
     if (!stock) return res.status(404).json({ error: `Stock with symbol ${symbolParam} not found` });
 
     if (isFavourite !== undefined || isfavoute !== undefined) {
@@ -5823,69 +5853,20 @@ app.patch('/api/stocks/:symbol', async (req, res) => {
   }
 });
 
-// DELETE /api/stocks/:symbol - Delete stock and its drawings
-app.delete('/api/stocks/:symbol', async (req, res) => {
+// DELETE /api/stocks/:symbol - Delete stock and its drawings (Secure User-Bound)
+app.delete('/api/stocks/:symbol', authMiddleware, async (req, res) => {
   try {
     const symbolParam = req.params.symbol.trim().toUpperCase();
     const wlName = (req.query.watchlist || req.body.watchlist || 'default').trim();
-    const result = await Stock.findOneAndDelete({ symbol: symbolParam, watchlist: wlName });
+    
+    const result = await Stock.findOneAndDelete({ symbol: symbolParam, watchlist: wlName, userId: req.user._id });
     if (!result) return res.status(404).json({ error: `Stock not found` });
 
-    await Drawing.deleteMany({ symbol: symbolParam });
+    // Clean up drawings for this stock for this user only
+    await Drawing.deleteMany({ symbol: symbolParam, userId: req.user._id });
     res.json({ message: `Stock ${symbolParam} deleted successfully`, deletedStock: result });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete stock from database' });
-  }
-});
-
-/* ── Drawings API Routes ───────────────────────────────────── */
-
-// GET /api/drawings - Fetch drawings for a specific symbol & chartMode
-app.get('/api/drawings', async (req, res) => {
-  try {
-    const symbolParam = (req.query.symbol || '').trim().toUpperCase();
-    const chartMode = (req.query.chartMode || 'price').trim();
-    if (!symbolParam) {
-      return res.status(400).json({ error: 'Symbol is required' });
-    }
-    const drawings = await Drawing.find({ symbol: symbolParam, chartMode });
-    res.json(drawings);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to retrieve drawings', details: error.message });
-  }
-});
-
-// POST /api/drawings - Save drawings for a specific symbol & chartMode (overwrite existing)
-app.post('/api/drawings', async (req, res) => {
-  try {
-    const symbolParam = (req.body.symbol || '').trim().toUpperCase();
-    const chartMode = (req.body.chartMode || 'price').trim();
-    const drawingsList = req.body.drawings || [];
-
-    if (!symbolParam) {
-      return res.status(400).json({ error: 'Symbol is required' });
-    }
-
-    // Atomically overwrite previous drawings
-    await Drawing.deleteMany({ symbol: symbolParam, chartMode });
-
-    if (drawingsList.length > 0) {
-      const drawingsToSave = drawingsList.map((d) => ({
-        symbol: symbolParam,
-        chartMode,
-        type: d.type,
-        points: d.points,
-        price: d.price,
-        time: d.time,
-        color: d.color,
-        config: d.config
-      }));
-      await Drawing.insertMany(drawingsToSave);
-    }
-
-    res.json({ message: 'Drawings synced successfully', count: drawingsList.length });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to sync drawings', details: error.message });
   }
 });
 
@@ -5927,71 +5908,96 @@ app.put('/api/custom-tags/:tagId', async (req, res) => {
   }
 });
 
-/* ── Drawings API Routes ────────────────────────────────────── */
-app.get('/api/drawings', async (req, res) => {
+
+
+
+
+/* ── Drawings API Routes (Secure User-Bound) ────────────────── */
+app.get('/api/drawings', parseUserMiddleware, async (req, res) => {
   try {
-    const { symbol, chartMode } = req.query;
-    if (!symbol) return res.status(400).json({ error: 'Symbol query parameter is required' });
-    const filter = { symbol: symbol.trim().toUpperCase() };
-    if (chartMode) filter.chartMode = chartMode.trim().toLowerCase();
+    const symbolParam = (req.query.symbol || '').trim().toUpperCase();
+    const chartMode = (req.query.chartMode || 'price').trim();
+    if (!symbolParam) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
+
+    // Filter by active user if logged in, or fall back to guest drawings (userId: null)
+    const filter = { symbol: symbolParam, chartMode };
+    if (req.user) {
+      filter.userId = req.user._id;
+    } else {
+      filter.userId = null;
+    }
+
     const drawings = await Drawing.find(filter);
     res.json(drawings);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to retrieve drawings' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to retrieve drawings', details: error.message });
   }
 });
 
-app.post('/api/drawings/sync', async (req, res) => {
+// Secure sync endpoints for saving
+const handleDrawingsSync = async (req, res) => {
   try {
-    const { symbol, chartMode, drawings } = req.body;
-    if (!symbol) return res.status(400).json({ error: 'Symbol is required' });
-    if (!chartMode) return res.status(400).json({ error: 'Chart mode is required' });
-    if (!Array.isArray(drawings)) return res.status(400).json({ error: 'Drawings must be an array' });
+    const symbolParam = (req.body.symbol || '').trim().toUpperCase();
+    const chartMode = (req.body.chartMode || 'price').trim();
+    const drawingsList = req.body.drawings || [];
 
-    const cleanSymbol = symbol.trim().toUpperCase();
-    const cleanMode = chartMode.trim().toLowerCase();
+    if (!symbolParam) {
+      return res.status(400).json({ error: 'Symbol is required' });
+    }
 
-    await Drawing.deleteMany({ symbol: cleanSymbol, chartMode: cleanMode });
-    const drawingsToSave = drawings.map(d => ({
-      symbol: cleanSymbol,
-      chartMode: cleanMode,
-      type: d.type,
-      points: d.points || [],
-      price: d.price,
-      time: d.time,
-      color: d.color || '#22c55e'
-    }));
+    // Overwrite previous drawings for THIS USER ONLY
+    await Drawing.deleteMany({ symbol: symbolParam, chartMode, userId: req.user._id });
 
-    const savedDrawings = await Drawing.insertMany(drawingsToSave);
-    res.status(200).json(savedDrawings);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to synchronize drawings', details: err.message });
+    if (drawingsList.length > 0) {
+      const drawingsToSave = drawingsList.map((d) => ({
+        userId: req.user._id,
+        symbol: symbolParam,
+        chartMode,
+        type: d.type,
+        points: d.points || [],
+        price: d.price,
+        time: d.time,
+        color: d.color,
+        config: d.config
+      }));
+      await Drawing.insertMany(drawingsToSave);
+    }
+
+    res.json({ message: 'Drawings synced successfully', count: drawingsList.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to sync drawings', details: error.message });
   }
-});
+};
+
+app.post('/api/drawings', authMiddleware, handleDrawingsSync);
+app.post('/api/drawings/sync', authMiddleware, handleDrawingsSync);
 
 
 
-/* ── Alert System API Endpoints ────────────────────────────── */
-
-app.get('/api/alerts', async (req, res) => {
+/* ── Alert System API Endpoints (Secure User-Bound) ────────── */
+app.get('/api/alerts', authMiddleware, async (req, res) => {
   try {
-    const list = await Alert.find({}).sort({ createdAt: -1 });
+    const list = await Alert.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: 'Failed to load alerts' });
   }
 });
 
-app.post('/api/alerts', async (req, res) => {
+app.post('/api/alerts', authMiddleware, async (req, res) => {
   try {
-    const { symbol, condition, value } = req.body;
+    const { symbol, condition, value, delivery } = req.body;
     if (!symbol || !condition || value === undefined) {
       return res.status(400).json({ error: 'Symbol, condition, and price level are required' });
     }
     const newAlert = new Alert({
+      userId: req.user._id,
       symbol: symbol.trim().toUpperCase(),
       condition,
-      value: parseFloat(value)
+      value: parseFloat(value),
+      delivery: delivery || 'in_app'
     });
     await newAlert.save();
     res.status(201).json(newAlert);
@@ -6000,10 +6006,13 @@ app.post('/api/alerts', async (req, res) => {
   }
 });
 
-app.delete('/api/alerts/:id', async (req, res) => {
+app.delete('/api/alerts/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    await Alert.findByIdAndDelete(id);
+    const deleted = await Alert.findOneAndDelete({ _id: id, userId: req.user._id });
+    if (!deleted) {
+      return res.status(404).json({ error: 'Alert rule not found or unauthorized' });
+    }
     res.json({ message: 'Alert deleted successfully' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete alert' });
@@ -6186,10 +6195,12 @@ app.post('/api/screener/sync', async (req, res) => {
   }
 });
 
-/* ── Holdings & Live Portfolio Tracker ─────────────────────── */
-app.get('/api/holdings', async (req, res) => {
+
+
+/* ── Holdings & Live Portfolio Tracker (Secure User-Bound) ─── */
+app.get('/api/holdings', authMiddleware, async (req, res) => {
   try {
-    const list = await Holding.find({}).lean();
+    const list = await Holding.find({ userId: req.user._id }).lean();
     
     // Enrich with live price from Yahoo Finance
     const { yahooFinance, YAHOO_MODULE_OPTS } = require('./lib/yahoo-finance');
@@ -6214,13 +6225,14 @@ app.get('/api/holdings', async (req, res) => {
   }
 });
 
-app.post('/api/holdings', async (req, res) => {
+app.post('/api/holdings', authMiddleware, async (req, res) => {
   try {
     const { symbol, name, buyPrice, quantity, purchaseDate, watchlist } = req.body;
     if (!symbol || !name || !buyPrice || !quantity) {
       return res.status(400).json({ error: 'Required attributes: symbol, name, buyPrice, quantity' });
     }
     const item = new Holding({
+      userId: req.user._id,
       symbol: symbol.trim().toUpperCase(),
       name: name.trim(),
       buyPrice: parseFloat(buyPrice),
@@ -6235,13 +6247,298 @@ app.post('/api/holdings', async (req, res) => {
   }
 });
 
-app.delete('/api/holdings/:id', async (req, res) => {
+app.delete('/api/holdings/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    await Holding.findByIdAndDelete(id);
+    const deleted = await Holding.findOneAndDelete({ _id: id, userId: req.user._id });
+    if (!deleted) {
+      return res.status(404).json({ error: 'Holding transaction not found or unauthorized' });
+    }
     res.json({ message: 'Holding transaction deleted successfully' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete holding transaction' });
+  }
+});
+
+/* ── JWT Authentication & User Management Endpoints ────────── */
+const User = require('./models/User');
+const UserPreference = require('./models/UserPreference');
+const { signJWT, verifyJWT } = require('./lib/jwt');
+const JWT_SECRET = process.env.JWT_SECRET || 'vision-wealth-default-secret-key-321';
+
+// Authentication verification middleware
+async function authMiddleware(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication token required' });
+    }
+    const token = authHeader.split(' ')[1];
+    const payload = verifyJWT(token, JWT_SECRET);
+    if (!payload || !payload.id) {
+      return res.status(401).json({ error: 'Authentication token has expired or is invalid' });
+    }
+    const user = await User.findById(payload.id);
+    if (!user) {
+      return res.status(401).json({ error: 'User account no longer exists' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    res.status(500).json({ error: 'Authentication processing failure', details: err.message });
+  }
+}
+
+// Client guest parsing middleware (Optional auth)
+async function parseUserMiddleware(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const payload = verifyJWT(token, JWT_SECRET);
+      if (payload && payload.id) {
+        const user = await User.findById(payload.id);
+        if (user) {
+          req.user = user;
+        }
+      }
+    }
+  } catch (e) {}
+  next();
+}
+
+// POST /api/auth/register - Register a new user
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { fullName, email, password } = req.body;
+    if (!fullName || !email || !password) {
+      return res.status(400).json({ error: 'All attributes (fullName, email, password) are required' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: trimmedEmail });
+    if (existing) {
+      return res.status(400).json({ error: 'An account with this email already exists' });
+    }
+
+    // Hash the password with pbkdf2
+    const { salt, hash } = User.hashPassword(password);
+    
+    // Generate verification token (simple hex string)
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+
+    const newUser = new User({
+      fullName: fullName.trim(),
+      email: trimmedEmail,
+      passwordHash: hash,
+      salt,
+      verificationToken,
+      emailVerified: false,
+    });
+
+    await newUser.save();
+
+    // Create default preference profile
+    const prefs = new UserPreference({
+      userId: newUser._id,
+      theme: 'dark',
+      timezone: 'Asia/Kolkata',
+    });
+    await prefs.save();
+
+    // Sign active session JWT
+    const token = signJWT({ id: newUser._id, email: newUser.email }, JWT_SECRET);
+
+    res.status(201).json({
+      message: 'Account registered successfully. Verification token generated.',
+      token,
+      user: {
+        id: newUser._id,
+        fullName: newUser.fullName,
+        email: newUser.email,
+        emailVerified: newUser.emailVerified,
+        role: newUser.role,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Registration failed', details: err.message });
+  }
+});
+
+// POST /api/auth/login - User login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user || !user.validatePassword(password)) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Update lastLogin
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Sign session JWT
+    const token = signJWT({ id: user._id, email: user.email }, JWT_SECRET);
+
+    // Fetch user preferences
+    let prefs = await UserPreference.findOne({ userId: user._id });
+    if (!prefs) {
+      prefs = new UserPreference({ userId: user._id });
+      await prefs.save();
+    }
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        fullName: user.fullName,
+        email: user.email,
+        emailVerified: user.emailVerified,
+        role: user.role,
+      },
+      preferences: {
+        theme: prefs.theme,
+        timezone: prefs.timezone,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed', details: err.message });
+  }
+});
+
+// GET /api/auth/me - Get current logged in user details
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const prefs = await UserPreference.findOne({ userId: req.user._id });
+    res.json({
+      user: {
+        id: req.user._id,
+        fullName: req.user.fullName,
+        email: req.user.email,
+        emailVerified: req.user.emailVerified,
+        role: req.user.role,
+        createdAt: req.user.createdAt,
+      },
+      preferences: prefs || { theme: 'dark', timezone: 'Asia/Kolkata' },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve profile details' });
+  }
+});
+
+// POST /api/auth/forgot-password - Trigger reset email flow
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) {
+      // Avoid disclosing user existence (standard security practice)
+      return res.json({ message: 'If this account exists, a reset link will be sent' });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour expiration
+    await user.save();
+
+    res.json({
+      message: 'Reset link generated successfully',
+      resetToken, // Return token directly for validation in sandbox without actual SMTP setup
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to generate reset request' });
+  }
+});
+
+// POST /api/auth/reset-password - Complete password reset
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { resetToken, password } = req.body;
+    if (!resetToken || !password) {
+      return res.status(400).json({ error: 'Reset token and new password are required' });
+    }
+
+    const user = await User.findOne({
+      resetPasswordToken: resetToken,
+      resetPasswordExpires: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Reset token is invalid or has expired' });
+    }
+
+    const { salt, hash } = User.hashPassword(password);
+    user.passwordHash = hash;
+    user.salt = salt;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    res.json({ message: 'Password reset successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// POST /api/auth/verify-email - Complete verification token matching
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Verification token is required' });
+
+    const user = await User.findOne({ verificationToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid verification token' });
+    }
+
+    user.emailVerified = true;
+    user.verificationToken = undefined;
+    await user.save();
+
+    res.json({ message: 'Email address verified successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Email verification failed' });
+  }
+});
+
+// PUT /api/auth/preferences - Update user preferences
+app.put('/api/auth/preferences', authMiddleware, async (req, res) => {
+  try {
+    const { theme, timezone } = req.body;
+    let prefs = await UserPreference.findOne({ userId: req.user._id });
+    if (!prefs) {
+      prefs = new UserPreference({ userId: req.user._id });
+    }
+    if (theme) prefs.theme = theme;
+    if (timezone) prefs.timezone = timezone;
+    await prefs.save();
+    res.json({ message: 'Preferences updated successfully', preferences: prefs });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update preferences' });
+  }
+});
+
+// PUT /api/auth/profile - Update profile details
+app.put('/api/auth/profile', authMiddleware, async (req, res) => {
+  try {
+    const { fullName, password } = req.body;
+    if (fullName) req.user.fullName = fullName.trim();
+    if (password) {
+      const { salt, hash } = User.hashPassword(password);
+      req.user.passwordHash = hash;
+      req.user.salt = salt;
+    }
+    await req.user.save();
+    res.json({ message: 'Profile updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update profile' });
   }
 });
 

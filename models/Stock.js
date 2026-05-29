@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const stockSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false,
+    index: true
+  },
   symbol: {
     type: String,
     required: [true, 'Stock symbol is required'],
@@ -34,8 +40,8 @@ const stockSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Compound unique index — a symbol can only exist once per watchlist
-stockSchema.index({ watchlist: 1, symbol: 1 }, { unique: true });
+// Compound unique index — a symbol can only exist once per watchlist per user
+stockSchema.index({ watchlist: 1, symbol: 1, userId: 1 }, { unique: true });
 // Text index for server-side search
 stockSchema.index({ symbol: 'text', name: 'text' });
 

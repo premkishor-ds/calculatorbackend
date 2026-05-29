@@ -1,11 +1,16 @@
 const mongoose = require('mongoose');
 
 const watchlistSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false,
+    index: true
+  },
   name: {
     type: String,
     required: [true, 'Watchlist name is required'],
-    trim: true,
-    unique: true
+    trim: true
   },
   description: {
     type: String,

@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const drawingSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false,
+    index: true
+  },
   symbol: {
     type: String,
     required: [true, 'Symbol is required'],
