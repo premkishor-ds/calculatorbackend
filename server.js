@@ -3,7 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const mongoose = require('mongoose');
+const _mongoose = require('mongoose');
 const cors = require('cors');
 const { setupSwagger } = require('./swagger');
 
@@ -5711,7 +5711,7 @@ app.get('/api/watchlists', parseUserMiddleware, async (req, res) => {
     }
     
     res.json(lists);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to retrieve watchlists' });
   }
 });
@@ -5852,7 +5852,7 @@ app.get('/api/stocks', parseUserMiddleware, async (req, res) => {
     }
     const stocks = await Stock.find(filter).sort({ updatedAt: -1 });
     res.json(stocks);
-  } catch (error) {
+  } catch (_error) {
     res.status(500).json({ error: 'Failed to retrieve stocks from database' });
   }
 });
@@ -5941,7 +5941,7 @@ app.delete('/api/stocks/:symbol', authMiddleware, async (req, res) => {
     // Clean up drawings for this stock for this user only
     await Drawing.deleteMany({ symbol: symbolParam, userId: req.user._id });
     res.json({ message: `Stock ${symbolParam} deleted successfully`, deletedStock: result });
-  } catch (error) {
+  } catch (_error) {
     res.status(500).json({ error: 'Failed to delete stock from database' });
   }
 });
@@ -5963,7 +5963,7 @@ app.get('/api/custom-tags', async (req, res) => {
       return found ? { tagId: found.tagId, label: found.label, color: found.color } : def;
     });
     res.json(result);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch custom tags' });
   }
 });
@@ -5979,7 +5979,7 @@ app.put('/api/custom-tags/:tagId', async (req, res) => {
       { upsert: true, new: true }
     );
     res.json({ tagId: tag.tagId, label: tag.label, color: tag.color });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to update custom tag' });
   }
 });
@@ -6126,7 +6126,7 @@ app.get('/api/watchlists/:name/analytics', authMiddleware, async (req, res) => {
       topLoser,
       stocksCount: stocks.length
     });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Watchlist analytics processing failed' });
   }
 });
@@ -6205,7 +6205,7 @@ app.get('/api/alerts', authMiddleware, async (req, res) => {
   try {
     const list = await Alert.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json(list);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to load alerts' });
   }
 });
@@ -6225,7 +6225,7 @@ app.post('/api/alerts', authMiddleware, async (req, res) => {
     });
     await newAlert.save();
     res.status(201).json(newAlert);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to create alert' });
   }
 });
@@ -6238,7 +6238,7 @@ app.delete('/api/alerts/:id', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Alert rule not found or unauthorized' });
     }
     res.json({ message: 'Alert deleted successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to delete alert' });
   }
 });
@@ -6249,7 +6249,7 @@ app.get('/api/workspace/layouts', async (req, res) => {
   try {
     const layouts = await WorkspaceLayout.find({}).sort({ updatedAt: -1 });
     res.json(layouts);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to load workspace layouts' });
   }
 });
@@ -6260,7 +6260,7 @@ app.get('/api/workspace/layouts/:name', async (req, res) => {
     const item = await WorkspaceLayout.findOne({ name });
     if (!item) return res.status(404).json({ error: 'Layout not found' });
     res.json(item);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch layout details' });
   }
 });
@@ -6275,7 +6275,7 @@ app.post('/api/workspace/layouts', async (req, res) => {
       { upsert: true, new: true }
     );
     res.status(200).json(item);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to save workspace layout' });
   }
 });
@@ -6285,7 +6285,7 @@ app.delete('/api/workspace/layouts/:name', async (req, res) => {
     const { name } = req.params;
     await WorkspaceLayout.findOneAndDelete({ name });
     res.json({ message: 'Workspace layout deleted successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to delete layout' });
   }
 });
@@ -6352,7 +6352,7 @@ app.get('/api/screener/meta', async (req, res) => {
       completedAt: sync?.completedAt || null,
       errorMessage: sync?.errorMessage || '',
     });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to read screener metadata' });
   }
 });
@@ -6444,7 +6444,7 @@ app.get('/api/holdings', authMiddleware, async (req, res) => {
       })
     );
     res.json(enriched);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch holdings list' });
   }
 });
@@ -6469,7 +6469,7 @@ app.post('/api/holdings', authMiddleware, async (req, res) => {
     });
     await item.save();
     res.status(201).json(item);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to record stock holding transaction' });
   }
 });
@@ -6482,7 +6482,7 @@ app.delete('/api/holdings/:id', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Holding transaction not found or unauthorized' });
     }
     res.json({ message: 'Holding transaction deleted successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to delete holding transaction' });
   }
 });
@@ -6522,7 +6522,7 @@ app.post('/api/holdings/import-csv', authMiddleware, async (req, res) => {
     }
 
     res.json({ message: `Successfully imported ${importedCount} portfolio trades from CSV.` });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'CSV file import transaction failed' });
   }
 });
@@ -6570,7 +6570,7 @@ async function parseUserMiddleware(req, res, next) {
         }
       }
     }
-  } catch (e) {}
+  } catch (_e) {}
   next();
 }
 
@@ -6728,7 +6728,7 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
       },
       preferences: prefs || { theme: 'dark', timezone: 'Asia/Kolkata' },
     });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to retrieve profile details' });
   }
 });
@@ -6754,7 +6754,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       message: 'Reset link generated successfully',
       resetToken, // Return token directly for validation in sandbox without actual SMTP setup
     });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to generate reset request' });
   }
 });
@@ -6784,7 +6784,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     await user.save();
 
     res.json({ message: 'Password reset successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to reset password' });
   }
 });
@@ -6805,7 +6805,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
     await user.save();
 
     res.json({ message: 'Email address verified successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Email verification failed' });
   }
 });
@@ -6822,7 +6822,7 @@ app.put('/api/auth/preferences', authMiddleware, async (req, res) => {
     if (timezone) prefs.timezone = timezone;
     await prefs.save();
     res.json({ message: 'Preferences updated successfully', preferences: prefs });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to update preferences' });
   }
 });
@@ -6842,7 +6842,7 @@ app.put('/api/auth/profile', authMiddleware, async (req, res) => {
     }
     await req.user.save();
     res.json({ message: 'Profile updated successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to update profile' });
   }
 });
@@ -6857,7 +6857,7 @@ app.get('/api/auth/sessions', authMiddleware, async (req, res) => {
       isCurrent: req.headers.authorization?.split(' ')[1] === s.token
     }));
     res.json(active);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to retrieve active sessions' });
   }
 });
@@ -6869,7 +6869,7 @@ app.post('/api/auth/logout-all', authMiddleware, async (req, res) => {
     req.user.activeSessions = (req.user.activeSessions || []).filter(s => s.token === currentToken);
     await req.user.save();
     res.json({ message: 'Logged out from all other active device sessions successfully.' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to perform session revocation' });
   }
 });
@@ -6896,7 +6896,7 @@ app.delete('/api/auth/account', authMiddleware, async (req, res) => {
     ]);
 
     res.json({ message: 'User account and all related portfolio configurations deleted permanently.' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Account deletion transaction failed' });
   }
 });
@@ -6913,7 +6913,7 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
       .lean();
     const unreadCount = await Notification.countDocuments({ userId: req.user._id, isRead: false });
     res.json({ notifications: list, unreadCount });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to load notifications' });
   }
 });
@@ -6929,7 +6929,7 @@ app.put('/api/notifications/:id/read', authMiddleware, async (req, res) => {
     );
     if (!notif) return res.status(404).json({ error: 'Notification not found' });
     res.json(notif);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to mark notification as read' });
   }
 });
@@ -6942,7 +6942,7 @@ app.put('/api/notifications/read-all', authMiddleware, async (req, res) => {
       { isRead: true }
     );
     res.json({ message: 'All notifications marked as read' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to mark all notifications as read' });
   }
 });
@@ -6954,7 +6954,7 @@ app.delete('/api/notifications/:id', authMiddleware, async (req, res) => {
     const deleted = await Notification.findOneAndDelete({ _id: id, userId: req.user._id });
     if (!deleted) return res.status(404).json({ error: 'Notification not found or unauthorized' });
     res.json({ message: 'Notification deleted successfully' });
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to delete notification' });
   }
 });
@@ -7052,7 +7052,7 @@ app.get('/api/corporate-actions', parseUserMiddleware, async (req, res) => {
 });
 
 // Error handling middleware
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error('Unhandled server error:', err);
   res.status(500).json({ error: 'Internal server error occurred' });
 });

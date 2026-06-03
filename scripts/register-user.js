@@ -1,5 +1,5 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
-const mongoose = require('mongoose');
+const _mongoose = require('mongoose');
 const { connectMongo } = require('../lib/connect-mongo');
 const User = require('../models/User');
 
