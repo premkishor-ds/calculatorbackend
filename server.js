@@ -6170,12 +6170,13 @@ const handleDrawingsSync = async (req, res) => {
       return res.status(400).json({ error: 'Symbol is required' });
     }
 
-    // Overwrite previous drawings for THIS USER ONLY
-    await Drawing.deleteMany({ symbol: symbolParam, chartMode, userId: req.user._id });
+    // Overwrite previous drawings for THIS USER ONLY (or guest if not authenticated)
+    const userId = req.user ? req.user._id : null;
+    await Drawing.deleteMany({ symbol: symbolParam, chartMode, userId });
 
     if (drawingsList.length > 0) {
       const drawingsToSave = drawingsList.map((d) => ({
-        userId: req.user._id,
+        userId,
         symbol: symbolParam,
         chartMode,
         type: d.type,
@@ -6194,8 +6195,8 @@ const handleDrawingsSync = async (req, res) => {
   }
 };
 
-app.post('/api/drawings', authMiddleware, handleDrawingsSync);
-app.post('/api/drawings/sync', authMiddleware, handleDrawingsSync);
+app.post('/api/drawings', parseUserMiddleware, handleDrawingsSync);
+app.post('/api/drawings/sync', parseUserMiddleware, handleDrawingsSync);
 
 
 
