@@ -18,7 +18,15 @@ const MarketStock = require('./models/MarketStock');
 const ScreenerSync = require('./models/ScreenerSync');
 const Holding = require('./models/Holding');
 const Notification = require('./models/Notification');
+const StockDetails = require('./models/StockDetails');
+const StockSyncLog = require('./models/StockSyncLog');
+const StockMetrics = require('./models/StockMetrics');
+const StockGrowthMetrics = require('./models/StockGrowthMetrics');
+const StockValuationMetrics = require('./models/StockValuationMetrics');
+const StockRiskMetrics = require('./models/StockRiskMetrics');
+const StockScores = require('./models/StockScores');
 
+const { syncSingleStock, syncAllStocks, scheduleStockDetailsCron } = require('./services/stock-sync');
 const { buildScreenerQuery, buildSort } = require('./lib/screener-query');
 const {
   runScreenerSync,
@@ -128,6 +136,7 @@ async function initDatabase() {
   await seedDefaultStocks();
   await syncSimulatorSymbolsFromDb();
   scheduleScreenerCron();
+  scheduleStockDetailsCron();
   // Do not block HTTP — full sync can take 30–60+ min on Render
   ensureTodaySnapshot().catch((err) => {
     console.error('[ScreenerSync] Background startup sync failed:', err.message);
@@ -5880,6 +5889,12 @@ app.post('/api/stocks', authMiddleware, async (req, res) => {
       existingStock.name = formattedName;
       existingStock.isFavourite = favStatus;
       await existingStock.save();
+      try {
+        await syncSingleStock(formattedSymbol, existingStock._id, { force: true });
+      } catch (err) {
+        // Log sync issue but don't fail update since it's already there
+        console.error('[StockSync] Existing stock sync failed:', err.message);
+      }
       return res.status(200).json(existingStock);
     }
 
@@ -5892,6 +5907,21 @@ app.post('/api/stocks', authMiddleware, async (req, res) => {
     });
 
     await newStock.save();
+    
+    try {
+      await syncSingleStock(formattedSymbol, newStock._id, { force: true });
+    } catch (syncErr) {
+      // Rollback watchlist save if details fetch fails
+      await Stock.deleteOne({ _id: newStock._id });
+      if (syncErr.message === 'Invalid stock symbol.') {
+        return res.status(400).json({ error: 'Invalid stock symbol.' });
+      }
+      if (syncErr.message === 'Unable to connect to Yahoo Finance.') {
+        return res.status(503).json({ error: 'Unable to connect to Yahoo Finance.' });
+      }
+      return res.status(500).json({ error: 'Failed to fetch stock data. Please try again later.' });
+    }
+
     scheduleSimulatorSync();
     res.status(201).json(newStock);
   } catch (error) {
@@ -5940,9 +5970,241 @@ app.delete('/api/stocks/:symbol', authMiddleware, async (req, res) => {
 
     // Clean up drawings for this stock for this user only
     await Drawing.deleteMany({ symbol: symbolParam, userId: req.user._id });
+    
+    // Clean up stock details and sync logs
+    await StockDetails.deleteMany({ symbol: symbolParam });
+    await StockSyncLog.deleteMany({ symbol: symbolParam });
+
     res.json({ message: `Stock ${symbolParam} deleted successfully`, deletedStock: result });
   } catch (_error) {
     res.status(500).json({ error: 'Failed to delete stock from database' });
+  }
+});
+
+/* ── Stock Details & Sync Routes ───────────────────────────── */
+
+// POST /api/watchlist - Add stock to watchlist
+app.post('/api/watchlist', authMiddleware, async (req, res) => {
+  try {
+    let { symbol, name, isFavourite, watchlist } = req.body;
+    if (!symbol) return res.status(400).json({ error: 'Stock symbol is required' });
+    if (!name) return res.status(400).json({ error: 'Stock name is required' });
+
+    const formattedSymbol = symbol.trim().toUpperCase();
+    const formattedName = name.trim();
+    const wlName = (watchlist || 'default').trim();
+    const favStatus = !!isFavourite;
+
+    await registerSymbolInSimulator(formattedSymbol);
+
+    let existingStock = await Stock.findOne({ 
+      symbol: formattedSymbol, 
+      watchlist: wlName, 
+      userId: req.user._id 
+    });
+    if (existingStock) {
+      existingStock.name = formattedName;
+      existingStock.isFavourite = favStatus;
+      await existingStock.save();
+      try {
+        await syncSingleStock(formattedSymbol, existingStock._id, { force: true });
+      } catch (err) {
+        console.error('[StockSync] Existing stock sync failed:', err.message);
+      }
+      return res.status(200).json(existingStock);
+    }
+
+    const newStock = new Stock({
+      userId: req.user._id,
+      symbol: formattedSymbol,
+      name: formattedName,
+      isFavourite: favStatus,
+      watchlist: wlName
+    });
+
+    await newStock.save();
+    
+    try {
+      await syncSingleStock(formattedSymbol, newStock._id, { force: true });
+    } catch (syncErr) {
+      await Stock.deleteOne({ _id: newStock._id });
+      if (syncErr.message === 'Invalid stock symbol.') {
+        return res.status(400).json({ error: 'Invalid stock symbol.' });
+      }
+      if (syncErr.message === 'Unable to connect to Yahoo Finance.') {
+        return res.status(503).json({ error: 'Unable to connect to Yahoo Finance.' });
+      }
+      return res.status(500).json({ error: 'Failed to fetch stock data. Please try again later.' });
+    }
+
+    scheduleSimulatorSync();
+    res.status(201).json(newStock);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Stock symbol already exists in this watchlist' });
+    }
+    res.status(500).json({ error: 'Failed to add stock to database', details: error.message });
+  }
+});
+
+// DELETE /api/watchlist/:symbol - Remove stock from watchlist
+app.delete('/api/watchlist/:symbol', authMiddleware, async (req, res) => {
+  try {
+    const symbolParam = req.params.symbol.trim().toUpperCase();
+    const wlName = (req.query.watchlist || req.body.watchlist || 'default').trim();
+    
+    const result = await Stock.findOneAndDelete({ symbol: symbolParam, watchlist: wlName, userId: req.user._id });
+    if (!result) return res.status(404).json({ error: `Stock not found` });
+
+    await Drawing.deleteMany({ symbol: symbolParam, userId: req.user._id });
+    await StockDetails.deleteMany({ symbol: symbolParam });
+    await StockSyncLog.deleteMany({ symbol: symbolParam });
+
+    res.json({ message: `Stock ${symbolParam} deleted successfully`, deletedStock: result });
+  } catch (_error) {
+    res.status(500).json({ error: 'Failed to delete stock from database' });
+  }
+});
+
+// GET /api/stocks/:symbol - Get stock details
+app.get('/api/stocks/:symbol', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    
+    let details = await StockDetails.findOne({ symbol });
+    
+    if (!details) {
+      const wlStock = await Stock.findOne({ symbol });
+      const stockId = wlStock ? wlStock._id : new _mongoose.Types.ObjectId();
+      
+      try {
+        const syncResult = await syncSingleStock(symbol, stockId, { force: true });
+        details = syncResult.data;
+      } catch (syncErr) {
+        if (syncErr.message === 'Invalid stock symbol.') {
+          return res.status(404).json({ error: 'Invalid stock symbol.' });
+        }
+        return res.status(500).json({ error: 'Unable to load stock details.' });
+      }
+    } else {
+      const ageMs = Date.now() - new Date(details.last_synced_at).getTime();
+      const ageHours = ageMs / (1000 * 60 * 60);
+      if (ageHours >= 24) {
+        console.log(`[StockSync] Cache expired for ${symbol} (${ageHours.toFixed(1)}h old). Triggering background sync.`);
+        Stock.findOne({ symbol }).then(wlStock => {
+          const stockId = wlStock ? wlStock._id : details.watchlist_stock_id;
+          syncSingleStock(symbol, stockId, { force: true }).catch(err => {
+            console.error(`[StockSync] Background sync failed for ${symbol}:`, err.message);
+          });
+        });
+      }
+    }
+    
+    if (!details) {
+      return res.status(404).json({ error: 'No stock data available.' });
+    }
+    
+    res.json(details);
+  } catch (err) {
+    res.status(500).json({ error: 'Unable to load stock details.' });
+  }
+});
+
+// POST /api/stocks/:symbol/sync - Manual Sync
+app.post('/api/stocks/:symbol/sync', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const wlStock = await Stock.findOne({ symbol });
+    const stockId = wlStock ? wlStock._id : new _mongoose.Types.ObjectId();
+    
+    try {
+      const syncResult = await syncSingleStock(symbol, stockId, { force: true });
+      res.json({ message: 'Sync successful', data: syncResult.data });
+    } catch (syncErr) {
+      if (syncErr.message === 'Invalid stock symbol.') {
+        return res.status(400).json({ error: 'Invalid stock symbol.' });
+      }
+      return res.status(500).json({ error: 'Failed to fetch stock data. Please try again later.' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Sync failed', details: err.message });
+  }
+});
+
+// GET /api/stocks/:symbol/metrics - Get technical indicators
+app.get('/api/stocks/:symbol/metrics', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const metrics = await StockMetrics.findOne({ symbol });
+    if (!metrics) return res.status(404).json({ error: 'No stock data available.' });
+    res.json(metrics);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock metrics' });
+  }
+});
+
+// GET /api/stocks/:symbol/growth - Get growth metrics
+app.get('/api/stocks/:symbol/growth', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const growth = await StockGrowthMetrics.findOne({ symbol });
+    if (!growth) return res.status(404).json({ error: 'No stock data available.' });
+    res.json(growth);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock growth metrics' });
+  }
+});
+
+// GET /api/stocks/:symbol/valuation - Get valuation metrics
+app.get('/api/stocks/:symbol/valuation', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const valuation = await StockValuationMetrics.findOne({ symbol });
+    if (!valuation) return res.status(404).json({ error: 'No stock data available.' });
+    res.json(valuation);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock valuation metrics' });
+  }
+});
+
+// GET /api/stocks/:symbol/risk - Get risk metrics
+app.get('/api/stocks/:symbol/risk', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const risk = await StockRiskMetrics.findOne({ symbol });
+    if (!risk) return res.status(404).json({ error: 'No stock data available.' });
+    res.json(risk);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock risk metrics' });
+  }
+});
+
+// GET /api/stocks/:symbol/scores - Get AI scores and rating
+app.get('/api/stocks/:symbol/scores', parseUserMiddleware, async (req, res) => {
+  try {
+    const symbol = req.params.symbol.trim().toUpperCase();
+    const scores = await StockScores.findOne({ symbol });
+    if (!scores) return res.status(404).json({ error: 'No stock data available.' });
+    res.json(scores);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch stock scores' });
+  }
+});
+
+// POST /api/stocks/sync-all - Sync All Stocks (Admin Only)
+app.post('/api/stocks/sync-all', authMiddleware, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: Admin privileges required' });
+    }
+    
+    syncAllStocks({ force: true }).catch(err => {
+      console.error('[StockSync] Bulk sync failed:', err);
+    });
+    
+    res.json({ message: 'Bulk synchronization started in the background.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to trigger bulk sync', details: err.message });
   }
 });
 
