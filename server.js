@@ -6105,7 +6105,7 @@ app.get('/api/stocks/:symbol', parseUserMiddleware, async (req, res) => {
     }
     
     res.json(details);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Unable to load stock details.' });
   }
 });
@@ -6138,7 +6138,7 @@ app.get('/api/stocks/:symbol/metrics', parseUserMiddleware, async (req, res) => 
     const metrics = await StockMetrics.findOne({ symbol });
     if (!metrics) return res.status(404).json({ error: 'No stock data available.' });
     res.json(metrics);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch stock metrics' });
   }
 });
@@ -6150,7 +6150,7 @@ app.get('/api/stocks/:symbol/growth', parseUserMiddleware, async (req, res) => {
     const growth = await StockGrowthMetrics.findOne({ symbol });
     if (!growth) return res.status(404).json({ error: 'No stock data available.' });
     res.json(growth);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch stock growth metrics' });
   }
 });
@@ -6162,7 +6162,7 @@ app.get('/api/stocks/:symbol/valuation', parseUserMiddleware, async (req, res) =
     const valuation = await StockValuationMetrics.findOne({ symbol });
     if (!valuation) return res.status(404).json({ error: 'No stock data available.' });
     res.json(valuation);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch stock valuation metrics' });
   }
 });
@@ -6174,7 +6174,7 @@ app.get('/api/stocks/:symbol/risk', parseUserMiddleware, async (req, res) => {
     const risk = await StockRiskMetrics.findOne({ symbol });
     if (!risk) return res.status(404).json({ error: 'No stock data available.' });
     res.json(risk);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch stock risk metrics' });
   }
 });
@@ -6186,7 +6186,7 @@ app.get('/api/stocks/:symbol/scores', parseUserMiddleware, async (req, res) => {
     const scores = await StockScores.findOne({ symbol });
     if (!scores) return res.status(404).json({ error: 'No stock data available.' });
     res.json(scores);
-  } catch (err) {
+  } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch stock scores' });
   }
 });

@@ -400,7 +400,7 @@ class StockCalculationService {
   }
 
   /* ── 4. Risk Analysis ─────────────────────────────────────── */
-  static calculateRiskMetrics(details, history, financialSummary) {
+  static calculateRiskMetrics(details, history, _financialSummary) {
     if (!history || history.length < 20) {
       return {
         annualized_volatility: 0.2, sharpe_ratio: 1, sortino_ratio: 1,

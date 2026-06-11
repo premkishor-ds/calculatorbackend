@@ -178,7 +178,7 @@ async function syncAllStocks(options = {}) {
       } else {
         successCount++;
       }
-    } catch (err) {
+    } catch (_err) {
       failCount++;
       // Continue processing other stocks
     }
